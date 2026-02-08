@@ -210,8 +210,11 @@ class EddyCalibration:
         if mpresult is None:
             # Manual Probe was aborted
             return
-        curpos = [mpresult.bed_x, mpresult.bed_y, mpresult.bed_z]
-        move = self.printer.lookup_object('toolhead').manual_move
+        toolhead = self.printer.lookup_object('toolhead')
+        move = toolhead.manual_move
+        # Preserve extruder positions for dual-extruder setups
+        full_pos = toolhead.get_position()
+        curpos = [mpresult.bed_x, mpresult.bed_y, mpresult.bed_z] + full_pos[3:]
         # Move away from the bed
         probe_calibrate_z = curpos[2]
         curpos[2] += 5.
