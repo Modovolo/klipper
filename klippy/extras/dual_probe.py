@@ -22,14 +22,14 @@ class DualProbeManager:
     [dual_probe]
     # T0 probe (left toolhead) - references the main [probe] section
     t0_probe: probe
-    # T1 probe (right toolhead) - references [dual_probe_t1] section
-    t1_probe: dual_probe_t1
+    # T1 probe (right toolhead) - references [dual_probe t1] section
+    t1_probe: dual_probe t1
     # Auto-switch probe based on active carriage
     auto_switch: True
     
     # Define your secondary probe in printer.cfg:
-    # NOTE: Must use 'dual_probe_' prefix for Klipper to recognize it
-    [dual_probe_t1]
+    # NOTE: Use 'dual_probe ' prefix with SPACE for Klipper to recognize it
+    [dual_probe t1]
     pin: ^!HermitCrab2_Board_2_right:gpio24
     x_offset: -35
     y_offset: -27
@@ -46,7 +46,7 @@ class DualProbeManager:
         
         # Probe section names
         self.t0_probe_name = config.get('t0_probe', 'probe')
-        self.t1_probe_name = config.get('t1_probe', 'dual_probe_t1')
+        self.t1_probe_name = config.get('t1_probe', 'dual_probe t1')
         
         # Auto-switch behavior
         self.auto_switch = config.getboolean('auto_switch', True)
@@ -325,7 +325,7 @@ class SecondaryProbe:
     conflicting with the main [probe] module's singleton registration.
     
     Configuration example:
-    [dual_probe_t1]
+    [dual_probe t1]
     pin: ^!HermitCrab2_Board_2_right:gpio24
     deactivate_on_each_sample: False
     x_offset: -35
@@ -503,7 +503,7 @@ def load_config(config):
     return DualProbeManager(config)
 
 def load_config_prefix(config):
-    # This allows [dual_probe_t1] or similar sections
-    # Klipper's load_config_prefix only works for sections
-    # matching the module name prefix (dual_probe_*)
+    # This allows [dual_probe t1] or similar sections
+    # Klipper's load_config_prefix handles sections like:
+    #   [module_name suffix] - with a SPACE separator
     return SecondaryProbe(config)
