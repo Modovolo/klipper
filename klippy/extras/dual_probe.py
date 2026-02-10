@@ -8,6 +8,7 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging
 import collections
+import math
 
 # Define ProbeResult locally (not all Klipper versions export it)
 ProbeResult = collections.namedtuple(
@@ -216,9 +217,23 @@ class SecondaryProbe:
             'HOME_Z_%s' % suffix,
             self.cmd_HOME_Z,
             desc="Home Z axis using %s (like G28 Z)" % self.name)
+        self.probe_calibrate_info = None
+        self.gcode.register_command(
+            'PROBE_CALIBRATE_%s' % suffix,
+            self.cmd_PROBE_CALIBRATE,
+            desc="Calibrate z_offset for %s" % self.name)
+        self.gcode.register_command(
+            'PROBE_ACCURACY_%s' % suffix,
+            self.cmd_PROBE_ACCURACY,
+            desc="Probe Z-height accuracy for %s" % self.name)
+        self.gcode.register_command(
+            'Z_OFFSET_APPLY_PROBE_%s' % suffix,
+            self.cmd_Z_OFFSET_APPLY_PROBE,
+            desc="Adjust the z_offset for %s" % self.name)
         
         logging.info("dual_probe: Registered PROBE_%s, QUERY_PROBE_%s,"
-                     " HOME_Z_%s" % (suffix, suffix, suffix))
+                     " HOME_Z_%s, PROBE_CALIBRATE_%s, PROBE_ACCURACY_%s"
+                     % (suffix, suffix, suffix, suffix, suffix))
     
     def _handle_connect(self):
         self.toolhead = self.printer.lookup_object('toolhead')
@@ -503,6 +518,131 @@ class SecondaryProbe:
         finally:
             # Stow probe
             self.mcu_probe.multi_probe_end()
+    
+    def _run_single_probe(self, gcmd):
+        """Run a single probe using probe session (for calibrate/accuracy)"""
+        probe_session = self.start_probe_session(gcmd)
+        probe_session.run_probe(gcmd)
+        pos = probe_session.pull_probed_results()[0]
+        probe_session.end_probe_session()
+        return pos
+    
+    def _move(self, coord, speed):
+        self.printer.lookup_object('toolhead').manual_move(coord, speed)
+    
+    def cmd_PROBE_CALIBRATE(self, gcmd):
+        """PROBE_CALIBRATE_T1 - Calibrate z_offset using paper test.
+        1. Probes to find bed
+        2. Lifts and moves nozzle over contact point
+        3. Starts manual Z probe (TESTZ/ACCEPT/ABORT)
+        4. Calculates and saves new z_offset"""
+        manual_probe = self.printer.lookup_object('manual_probe', None)
+        if manual_probe is None:
+            raise gcmd.error("manual_probe module not loaded")
+        # Verify no manual probe already in progress
+        from . import manual_probe as mp_module
+        mp_module.verify_no_manual_probe(self.printer)
+        
+        params = self.get_probe_params(gcmd)
+        
+        # Perform initial probe
+        ppos = self._run_single_probe(gcmd)
+        
+        # Move away from the bed
+        curpos = self.printer.lookup_object('toolhead').get_position()
+        curpos[2] += 5.
+        self._move(curpos, params['lift_speed'])
+        
+        # Move the nozzle over the probe contact point
+        curpos[0] = ppos.bed_x
+        curpos[1] = ppos.bed_y
+        self._move(curpos, params['probe_speed'])
+        
+        # Start manual probe (paper test)
+        self.probe_calibrate_info = (ppos, self.get_offsets())
+        gcmd.respond_info(
+            "%s: Starting z_offset calibration.\n"
+            "Use TESTZ to adjust, ACCEPT to save, ABORT to cancel."
+            % self.name)
+        mp_module.ManualProbeHelper(self.printer, gcmd,
+                                    self._probe_calibrate_finalize)
+    
+    def _probe_calibrate_finalize(self, mpresult):
+        """Called when user ACCEPTs the manual probe position"""
+        if mpresult is None:
+            return
+        ppos, offsets = self.probe_calibrate_info
+        z_offset = offsets[2] - mpresult.bed_z + ppos.bed_z
+        self.gcode.respond_info(
+            "%s: z_offset: %.3f\n"
+            "The SAVE_CONFIG command will update the printer config file\n"
+            "with the above and restart the printer." % (self.name, z_offset))
+        configfile = self.printer.lookup_object('configfile')
+        configfile.set(self.name, 'z_offset', "%.3f" % (z_offset,))
+    
+    def cmd_PROBE_ACCURACY(self, gcmd):
+        """PROBE_ACCURACY_T1 - Test probe repeatability"""
+        params = self.get_probe_params(gcmd)
+        sample_count = gcmd.get_int("SAMPLES", 10, minval=1)
+        toolhead = self.printer.lookup_object('toolhead')
+        start_pos = toolhead.get_position()
+        gcmd.respond_info(
+            "PROBE_ACCURACY_%s at X:%.3f Y:%.3f Z:%.3f"
+            " (samples=%d retract=%.3f"
+            " speed=%.1f lift_speed=%.1f)"
+            % (self.name.split(None, 1)[-1].upper() if ' ' in self.name
+               else self.name.upper(),
+               start_pos[0], start_pos[1], start_pos[2],
+               sample_count, params['sample_retract_dist'],
+               params['probe_speed'], params['lift_speed']))
+        # Create dummy gcmd with SAMPLES=1
+        fo_params = dict(gcmd.get_command_parameters())
+        fo_params['SAMPLES'] = '1'
+        fo_gcmd = self.gcode.create_gcode_command("", "", fo_params)
+        # Probe bed sample_count times
+        probe_session = self.start_probe_session(fo_gcmd)
+        probe_num = 0
+        while probe_num < sample_count:
+            probe_session.run_probe(fo_gcmd)
+            probe_num += 1
+            # Retract
+            lift_z = toolhead.get_position()[2] + params['sample_retract_dist']
+            liftpos = [start_pos[0], start_pos[1], lift_z]
+            self._move(liftpos, params['lift_speed'])
+        positions = probe_session.pull_probed_results()
+        probe_session.end_probe_session()
+        # Calculate statistics
+        z_vals = [p.bed_z for p in positions]
+        max_value = max(z_vals)
+        min_value = min(z_vals)
+        range_value = max_value - min_value
+        avg_value = sum(z_vals) / len(z_vals)
+        z_sorted = sorted(z_vals)
+        median = z_sorted[len(z_sorted) // 2]
+        # Standard deviation
+        deviation_sum = sum(pow(z - avg_value, 2.) for z in z_vals)
+        sigma = math.sqrt(deviation_sum / len(z_vals))
+        gcmd.respond_info(
+            "probe accuracy results: maximum %.6f, minimum %.6f, "
+            "range %.6f, average %.6f, median %.6f, "
+            "standard deviation %.6f"
+            % (max_value, min_value, range_value,
+               avg_value, median, sigma))
+    
+    def cmd_Z_OFFSET_APPLY_PROBE(self, gcmd):
+        """Z_OFFSET_APPLY_PROBE_T1 - Apply current gcode Z offset to z_offset"""
+        gcode_move = self.printer.lookup_object("gcode_move")
+        offset = gcode_move.get_status()['homing_origin'].z
+        if offset == 0:
+            gcmd.respond_info("Nothing to do: Z Offset is 0")
+            return
+        z_offset = self.z_offset + offset
+        gcmd.respond_info(
+            "%s: z_offset: %.3f\n"
+            "The SAVE_CONFIG command will update the printer config file\n"
+            "with the above and restart the printer." % (self.name, z_offset))
+        configfile = self.printer.lookup_object('configfile')
+        configfile.set(self.name, 'z_offset', "%.3f" % (z_offset,))
 
 
 class SecondaryProbeSession:
