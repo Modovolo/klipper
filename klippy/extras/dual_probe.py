@@ -210,6 +210,8 @@ class SecondaryProbe:
             'QUERY_PROBE_%s' % suffix,
             self.cmd_QUERY_PROBE,
             desc="Query state of %s" % self.name)
+        # Unregister first in case a gcode_macro with same name exists
+        self.gcode.register_command('HOME_Z_%s' % suffix, None)
         self.gcode.register_command(
             'HOME_Z_%s' % suffix,
             self.cmd_HOME_Z,
