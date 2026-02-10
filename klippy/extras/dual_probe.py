@@ -358,7 +358,7 @@ class SecondaryProbe:
         
         self.last_z_result = final.bed_z
         self.last_probe_position = self.gcode.Coord(
-            final.bed_x, final.bed_y, final.bed_z)
+            final.bed_x, final.bed_y, final.bed_z, 0.)
         
         logging.info("dual_probe: PROBE_%s complete: z=%.6f at %.3f,%.3f"
                      % (self.name, final.bed_z, final.bed_x, final.bed_y))
