@@ -210,9 +210,13 @@ class SecondaryProbe:
             'QUERY_PROBE_%s' % suffix,
             self.cmd_QUERY_PROBE,
             desc="Query state of %s" % self.name)
+        self.gcode.register_command(
+            'HOME_Z_%s' % suffix,
+            self.cmd_HOME_Z,
+            desc="Home Z axis using %s (like G28 Z)" % self.name)
         
-        logging.info("dual_probe: Registered PROBE_%s and QUERY_PROBE_%s"
-                     % (suffix, suffix))
+        logging.info("dual_probe: Registered PROBE_%s, QUERY_PROBE_%s,"
+                     " HOME_Z_%s" % (suffix, suffix, suffix))
     
     def _handle_connect(self):
         self.toolhead = self.printer.lookup_object('toolhead')
@@ -404,6 +408,99 @@ class SecondaryProbe:
         logging.info("dual_probe: QUERY_PROBE_%s: %s" % (self.name, state_str))
         gcmd.respond_info(
             "%s: %s" % (self.name, state_str))
+    
+    def cmd_HOME_Z(self, gcmd):
+        """HOME_Z_T1 command - Home Z using secondary probe.
+        Mimics stock G28 Z: probes down, sets Z=position_endstop at
+        trigger point, so Z=0 = bed surface. No SET_KINEMATIC_POSITION
+        artifacts in the result."""
+        logging.info("dual_probe: HOME_Z_%s command called" % self.name)
+        toolhead = self.printer.lookup_object('toolhead')
+        phoming = self.printer.lookup_object('homing')
+        
+        # Parameters (overridable from gcode)
+        probe_speed = gcmd.get_float('PROBE_SPEED', self.speed, above=0.)
+        slow_speed = gcmd.get_float('SLOW_SPEED',
+                                     max(probe_speed / 2., 1.), above=0.)
+        retract_dist = gcmd.get_float('RETRACT',
+                                       self.sample_retract_dist, above=0.)
+        samples = gcmd.get_int('SAMPLES', self.samples, minval=1)
+        samples_tolerance = gcmd.get_float('SAMPLES_TOLERANCE',
+                                            self.samples_tolerance, minval=0.)
+        samples_retries = gcmd.get_int('SAMPLES_TOLERANCE_RETRIES',
+                                        self.samples_tolerance_retries,
+                                        minval=0)
+        samples_result = gcmd.get('SAMPLES_RESULT', self.samples_result)
+        
+        # Deploy probe
+        self.mcu_probe.multi_probe_begin()
+        try:
+            # --- First fast probe to find approximate bed position ---
+            pos = toolhead.get_position()
+            pos[2] = self.z_position  # Target Z limit
+            curpos = phoming.probing_move(self.mcu_probe, pos, probe_speed)
+            
+            # Set Z = z_offset at trigger (exactly like stock homing)
+            curpos[2] = self.z_offset
+            toolhead.set_position(curpos)
+            gcmd.respond_info(
+                "HOME_Z %s: fast probe contact, Z set to %.3f"
+                % (self.name, self.z_offset))
+            
+            # --- Retract for second pass ---
+            liftpos = toolhead.get_position()
+            liftpos[2] += retract_dist
+            toolhead.manual_move(liftpos, self.lift_speed)
+            
+            # --- Accurate slow probe(s) ---
+            results = []
+            retries = 0
+            while len(results) < samples:
+                pos = toolhead.get_position()
+                pos[2] = self.z_position
+                curpos = phoming.probing_move(
+                    self.mcu_probe, pos, slow_speed)
+                
+                # Set Z = z_offset at trigger
+                curpos[2] = self.z_offset
+                toolhead.set_position(curpos)
+                results.append(self.z_offset)
+                
+                # Check tolerance
+                if (max(results) - min(results)) > samples_tolerance:
+                    if retries >= samples_retries:
+                        raise gcmd.error(
+                            "HOME_Z %s: samples exceed tolerance"
+                            % self.name)
+                    gcmd.respond_info(
+                        "HOME_Z %s: tolerance exceeded, retrying..."
+                        % self.name)
+                    retries += 1
+                    results = []
+                
+                # Retract between samples (except last)
+                if len(results) < samples:
+                    liftpos = toolhead.get_position()
+                    liftpos[2] += retract_dist
+                    toolhead.manual_move(liftpos, self.lift_speed)
+            
+            # Final: set Z = z_offset at bed contact
+            # (already set by last set_position, but be explicit)
+            final_pos = toolhead.get_position()
+            final_pos[2] = self.z_offset
+            toolhead.set_position(final_pos)
+            
+            self.last_z_result = self.z_offset
+            gcmd.respond_info(
+                "HOME_Z %s: complete. Z=%.3f at probe contact "
+                "(Z=0 is bed surface)" % (self.name, self.z_offset))
+            logging.info(
+                "dual_probe: HOME_Z_%s complete. Z=%.3f"
+                % (self.name, self.z_offset))
+        
+        finally:
+            # Stow probe
+            self.mcu_probe.multi_probe_end()
 
 
 class SecondaryProbeSession:
