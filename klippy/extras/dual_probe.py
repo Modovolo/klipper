@@ -70,6 +70,7 @@ class SecondaryProbeEndstopWrapper:
         
     def _lower_probe(self):
         """Deploy probe"""
+        logging.info("dual_probe: Deploying probe '%s'" % self.name)
         toolhead = self.printer.lookup_object('toolhead')
         start_pos = toolhead.get_position()
         self.activate_gcode.run_gcode_from_command()
@@ -79,6 +80,7 @@ class SecondaryProbeEndstopWrapper:
     
     def _raise_probe(self):
         """Stow probe"""
+        logging.info("dual_probe: Stowing probe '%s'" % self.name)
         toolhead = self.printer.lookup_object('toolhead')
         start_pos = toolhead.get_position()
         self.deactivate_gcode.run_gcode_from_command()
@@ -98,12 +100,14 @@ class SecondaryProbeEndstopWrapper:
         self.multi = 'OFF'
     
     def probe_prepare(self, hmove):
+        logging.info("dual_probe: probe_prepare called, multi=%s" % self.multi)
         if self.multi == 'OFF' or self.multi == 'FIRST':
             self._lower_probe()
             if self.multi == 'FIRST':
                 self.multi = 'ON'
     
     def probe_finish(self, hmove):
+        logging.info("dual_probe: probe_finish called, multi=%s" % self.multi)
         if self.multi == 'OFF':
             self._raise_probe()
     
@@ -204,9 +208,13 @@ class SecondaryProbe:
     def _handle_mcu_identify(self):
         # Register Z steppers with this endstop
         kin = self.printer.lookup_object('toolhead').get_kinematics()
+        z_steppers = []
         for stepper in kin.get_steppers():
             if stepper.is_active_axis('z'):
                 self.mcu_probe.add_stepper(stepper)
+                z_steppers.append(stepper.get_name())
+        logging.info("dual_probe: Added %d Z steppers to '%s' endstop: %s"
+                     % (len(z_steppers), self.name, z_steppers))
     
     def get_offsets(self, gcmd=None):
         return self.x_offset, self.y_offset, self.z_offset
@@ -253,12 +261,18 @@ class SecondaryProbe:
             raise self.printer.command_error("Must home before probe")
         
         pos = toolhead.get_position()
+        logging.info("dual_probe: _probe_single start pos=%.3f,%.3f,%.3f"
+                     " target_z=%.3f speed=%.1f"
+                     % (pos[0], pos[1], pos[2], self.z_position, speed))
         pos[2] = self.z_position  # Target Z (how far down to probe)
         
         phoming = self.printer.lookup_object('homing')
         # probing_move expects the endstop wrapper with
         # probe_prepare/probe_finish methods
         curpos = phoming.probing_move(self.mcu_probe, pos, speed)
+        
+        logging.info("dual_probe: probing_move returned pos=%.3f,%.3f,%.6f"
+                     % (curpos[0], curpos[1], curpos[2]))
         
         # Create ProbeResult
         bed_x = curpos[0] + self.x_offset
@@ -268,6 +282,8 @@ class SecondaryProbe:
             bed_x=bed_x, bed_y=bed_y, bed_z=bed_z,
             test_x=curpos[0], test_y=curpos[1], test_z=curpos[2])
         
+        logging.info("dual_probe: probe result bed=%.3f,%.3f,%.6f"
+                     % (bed_x, bed_y, bed_z))
         self.gcode.respond_info(
             "%s: at %.3f,%.3f bed will contact at z=%.6f"
             % (self.name, bed_x, bed_y, bed_z))
@@ -288,7 +304,13 @@ class SecondaryProbe:
     # G-Code commands
     def cmd_PROBE(self, gcmd):
         """PROBE_T1 command - probe at current position"""
+        logging.info("dual_probe: PROBE_%s command called" % self.name)
         params = self.get_probe_params(gcmd)
+        logging.info("dual_probe: probe params: speed=%.1f samples=%d"
+                     " retract=%.1f tolerance=%.3f"
+                     % (params['probe_speed'], params['samples'],
+                        params['sample_retract_dist'],
+                        params['samples_tolerance']))
         
         self.mcu_probe.multi_probe_begin()
         try:
@@ -338,6 +360,8 @@ class SecondaryProbe:
         self.last_probe_position = self.gcode.Coord(
             final.bed_x, final.bed_y, final.bed_z)
         
+        logging.info("dual_probe: PROBE_%s complete: z=%.6f at %.3f,%.3f"
+                     % (self.name, final.bed_z, final.bed_x, final.bed_y))
         gcmd.respond_info(
             "Result: at %.3f,%.3f estimate contact at z=%.6f"
             % (final.bed_x, final.bed_y, final.bed_z))
@@ -348,8 +372,10 @@ class SecondaryProbe:
         print_time = toolhead.get_last_move_time()
         res = self.mcu_probe.query_endstop(print_time)
         self.mcu_probe.last_state = res
+        state_str = ["open", "TRIGGERED"][not not res]
+        logging.info("dual_probe: QUERY_PROBE_%s: %s" % (self.name, state_str))
         gcmd.respond_info(
-            "%s: %s" % (self.name, ["open", "TRIGGERED"][not not res]))
+            "%s: %s" % (self.name, state_str))
 
 
 class SecondaryProbeSession:
