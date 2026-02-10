@@ -9,8 +9,9 @@
 import logging
 import collections
 
-# Match Klipper's ProbeResult namedtuple
-from . import manual_probe
+# Define ProbeResult locally (not all Klipper versions export it)
+ProbeResult = collections.namedtuple(
+    'probe_result', ['bed_x', 'bed_y', 'bed_z', 'test_x', 'test_y', 'test_z'])
 
 
 class SecondaryProbeEndstopWrapper:
@@ -263,7 +264,7 @@ class SecondaryProbe:
         bed_x = curpos[0] + self.x_offset
         bed_y = curpos[1] + self.y_offset
         bed_z = curpos[2]
-        result = manual_probe.ProbeResult(
+        result = ProbeResult(
             bed_x=bed_x, bed_y=bed_y, bed_z=bed_z,
             test_x=curpos[0], test_y=curpos[1], test_z=curpos[2])
         
@@ -327,7 +328,7 @@ class SecondaryProbe:
             final = results[len(results) // 2]
         else:
             avg_z = sum([r.bed_z for r in results]) / len(results)
-            final = manual_probe.ProbeResult(
+            final = ProbeResult(
                 bed_x=results[0].bed_x, bed_y=results[0].bed_y,
                 bed_z=avg_z,
                 test_x=results[0].test_x, test_y=results[0].test_y,
@@ -408,7 +409,7 @@ class SecondaryProbeSession:
             final = positions[len(positions) // 2]
         else:
             avg_z = sum([r.bed_z for r in positions]) / len(positions)
-            final = manual_probe.ProbeResult(
+            final = ProbeResult(
                 bed_x=positions[0].bed_x, bed_y=positions[0].bed_y,
                 bed_z=avg_z,
                 test_x=positions[0].test_x, test_y=positions[0].test_y,
