@@ -181,6 +181,18 @@ class SecondaryProbe:
             "klippy:connect", self._handle_connect)
         self.printer.register_event_handler(
             'klippy:mcu_identify', self._handle_mcu_identify)
+        # Register homing events so probe_prepare/probe_finish are called
+        # at the correct time during probing_move()
+        self.printer.register_event_handler(
+            "homing:homing_move_begin",
+            self._handle_homing_move_begin)
+        self.printer.register_event_handler(
+            "homing:homing_move_end",
+            self._handle_homing_move_end)
+        self.printer.register_event_handler(
+            "gcode:command_error",
+            self._handle_command_error)
+        self.multi_probe_pending = False
         
         # Register PROBE_xx and QUERY_PROBE_xx commands
         # Extract suffix from name: "dual_probe t1" -> "T1"
@@ -215,6 +227,22 @@ class SecondaryProbe:
                 z_steppers.append(stepper.get_name())
         logging.info("dual_probe: Added %d Z steppers to '%s' endstop: %s"
                      % (len(z_steppers), self.name, z_steppers))
+    
+    def _handle_homing_move_begin(self, hmove):
+        if self.mcu_probe in hmove.get_mcu_endstops():
+            self.mcu_probe.probe_prepare(hmove)
+    
+    def _handle_homing_move_end(self, hmove):
+        if self.mcu_probe in hmove.get_mcu_endstops():
+            self.mcu_probe.probe_finish(hmove)
+    
+    def _handle_command_error(self):
+        if self.multi_probe_pending:
+            self.multi_probe_pending = False
+            try:
+                self.mcu_probe.multi_probe_end()
+            except:
+                logging.exception("Multi-probe end failed on error")
     
     def get_offsets(self, gcmd=None):
         return self.x_offset, self.y_offset, self.z_offset
