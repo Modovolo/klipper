@@ -571,14 +571,24 @@ class SecondaryProbe:
         """Called when user ACCEPTs the manual probe position"""
         if mpresult is None:
             return
-        ppos, offsets = self.probe_calibrate_info
-        z_offset = offsets[2] - mpresult.bed_z + ppos.bed_z
-        self.gcode.respond_info(
-            "%s: z_offset: %.3f\n"
-            "The SAVE_CONFIG command will update the printer config file\n"
-            "with the above and restart the printer." % (self.name, z_offset))
-        configfile = self.printer.lookup_object('configfile')
-        configfile.set(self.name, 'z_offset', "%.3f" % (z_offset,))
+        try:
+            ppos, offsets = self.probe_calibrate_info
+            z_offset = offsets[2] - mpresult.bed_z + ppos.bed_z
+            logging.info(
+                "dual_probe: calibrate finalize: offsets[2]=%.3f"
+                " mpresult.bed_z=%.6f ppos.bed_z=%.6f -> z_offset=%.3f"
+                % (offsets[2], mpresult.bed_z, ppos.bed_z, z_offset))
+            gcode = self.printer.lookup_object('gcode')
+            gcode.respond_info(
+                "%s: z_offset: %.3f\n"
+                "The SAVE_CONFIG command will update the printer config file\n"
+                "with the above and restart the printer."
+                % (self.name, z_offset))
+            configfile = self.printer.lookup_object('configfile')
+            configfile.set(self.name, 'z_offset', "%.3f" % (z_offset,))
+        except Exception as e:
+            logging.exception("dual_probe: _probe_calibrate_finalize error")
+            raise
     
     def cmd_PROBE_ACCURACY(self, gcmd):
         """PROBE_ACCURACY_T1 - Test probe repeatability"""
