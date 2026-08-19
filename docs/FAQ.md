@@ -106,7 +106,7 @@ Klipper will run on a Raspberry Pi 1, 2 and on the Raspberry Pi Zero1,
 but these boards don't have enough processing power to run Klipper
 well. It is common for print stalls to occur on these slower machines
 when printing (The printer may move faster than Klipper can send
-movement commands.) It is not reccomended to run Kliper on these older
+movement commands.) It is not reccomended to run Klipper on these older
 machines.
 
 For running on the Beaglebone, see the
@@ -284,9 +284,9 @@ programmer - see [Bootloaders](Bootloaders.md) for further details.
 ## Will the heaters be left on if the Raspberry Pi crashes?
 
 The software has been designed to prevent that. Once the host enables
-a heater, the host software needs to confirm that enablement every 5
+a heater, the host software needs to confirm that enablement every 3
 seconds. If the micro-controller does not receive a confirmation every
-5 seconds it goes into a "shutdown" state which is designed to turn
+3 seconds it goes into a "shutdown" state which is designed to turn
 off all heaters and stepper motors.
 
 See the "config_digital_out" command in the

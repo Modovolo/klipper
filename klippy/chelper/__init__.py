@@ -36,40 +36,41 @@ defs_stepcompress = """
         int step_count, interval, add;
     };
 
-    struct stepcompress *stepcompress_alloc(uint32_t oid);
-    void stepcompress_fill(struct stepcompress *sc, uint32_t max_error
-        , int32_t queue_step_msgtag, int32_t set_next_step_dir_msgtag);
+    void stepcompress_fill(struct stepcompress *sc, uint32_t oid
+        , uint32_t max_error, int32_t queue_step_msgtag
+        , int32_t set_next_step_dir_msgtag);
     void stepcompress_set_invert_sdir(struct stepcompress *sc
         , uint32_t invert_sdir);
-    void stepcompress_free(struct stepcompress *sc);
     int stepcompress_reset(struct stepcompress *sc, uint64_t last_step_clock);
     int stepcompress_set_last_position(struct stepcompress *sc
         , uint64_t clock, int64_t last_position);
     int64_t stepcompress_find_past_position(struct stepcompress *sc
         , uint64_t clock);
-    int stepcompress_queue_msg(struct stepcompress *sc
-        , uint32_t *data, int len);
-    int stepcompress_queue_mq_msg(struct stepcompress *sc, uint64_t req_clock
-        , uint32_t *data, int len);
     int stepcompress_extract_old(struct stepcompress *sc
         , struct pull_history_steps *p, int max
         , uint64_t start_clock, uint64_t end_clock);
-    void stepcompress_set_stepper_kinematics(struct stepcompress *sc
-        , struct stepper_kinematics *sk);
-    struct stepper_kinematics *stepcompress_get_stepper_kinematics(
-        struct stepcompress *sc);
 """
 
 defs_steppersync = """
-    struct steppersync *steppersync_alloc(struct serialqueue *sq
-        , struct stepcompress **sc_list, int sc_num, int move_num);
-    void steppersync_free(struct steppersync *ss);
+    struct stepcompress *syncemitter_get_stepcompress(struct syncemitter *se);
+    void syncemitter_set_stepper_kinematics(struct syncemitter *se
+        , struct stepper_kinematics *sk);
+    struct stepper_kinematics *syncemitter_get_stepper_kinematics(
+        struct syncemitter *se);
+    void syncemitter_queue_msg(struct syncemitter *se, uint64_t req_clock
+        , uint32_t *data, int len);
+    struct syncemitter *steppersync_alloc_syncemitter(struct steppersync *ss
+        , char name[16], int alloc_stepcompress);
+    void steppersync_setup_movequeue(struct steppersync *ss
+        , struct serialqueue *sq, int move_num);
     void steppersync_set_time(struct steppersync *ss
         , double time_offset, double mcu_freq);
-    int32_t steppersync_generate_steps(struct steppersync *ss
-        , double gen_steps_time, uint64_t flush_clock);
-    void steppersync_history_expire(struct steppersync *ss, uint64_t end_clock);
-    int steppersync_flush(struct steppersync *ss, uint64_t move_clock);
+    struct steppersyncmgr *steppersyncmgr_alloc(void);
+    void steppersyncmgr_free(struct steppersyncmgr *ssm);
+    struct steppersync *steppersyncmgr_alloc_steppersync(
+        struct steppersyncmgr *ssm);
+    struct syncemitter *steppersyncmgr_gen_steps(struct steppersyncmgr *ssm
+        , double flush_time, double gen_steps_time, double clear_history_time);
 """
 
 defs_itersolve = """
@@ -203,7 +204,7 @@ defs_serialqueue = """
     void serialqueue_set_receive_window(struct serialqueue *sq
         , int receive_window);
     void serialqueue_set_clock_est(struct serialqueue *sq, double est_freq
-        , double conv_time, uint64_t conv_clock, uint64_t last_clock);
+        , double conv_time, uint64_t conv_clock);
     void serialqueue_get_stats(struct serialqueue *sq, char *buf, int len);
     int serialqueue_extract_old(struct serialqueue *sq, int sentq
         , struct pull_queue_message *q, int max);
