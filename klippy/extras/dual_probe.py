@@ -1,0 +1,961 @@
+# Dual probe support for IDEX printers
+#
+# Manages two independent probes (one per toolhead) without modifying
+# the core Klipper probe module.
+#
+# Copyright (C) 2026  Custom Extension
+#
+# This file may be distributed under the terms of the GNU GPLv3 license.
+import logging
+import collections
+import math
+
+# Define ProbeResult locally (not all Klipper versions export it)
+ProbeResult = collections.namedtuple(
+    'probe_result', ['bed_x', 'bed_y', 'bed_z', 'test_x', 'test_y', 'test_z'])
+
+
+def normalize_probe_result(probe, result):
+    if hasattr(result, 'bed_z'):
+        return result
+    offsets = probe.get_offsets()
+    try:
+        test_x, test_y, test_z = result[:3]
+    except Exception:
+        test_x = result.x
+        test_y = result.y
+        test_z = result.z
+    return ProbeResult(
+        bed_x=test_x + offsets[0], bed_y=test_y + offsets[1],
+        bed_z=test_z, test_x=test_x, test_y=test_y, test_z=test_z)
+
+
+class SecondaryProbeEndstopWrapper:
+    """
+    Endstop wrapper for secondary probe.
+    Matches the interface that homing.probing_move() expects:
+    - probe_prepare(hmove)
+    - probe_finish(hmove)
+    - multi_probe_begin()
+    - multi_probe_end()
+    - get_position_endstop()
+    
+    Also wraps the MCU endstop methods needed for homing:
+    - get_mcu()
+    - add_stepper()
+    - get_steppers()
+    - home_start()
+    - home_wait()
+    - query_endstop()
+    """
+    def __init__(self, config):
+        self.printer = config.get_printer()
+        self.name = config.get_name()
+        self.position_endstop = config.getfloat('z_offset')
+        self.stow_on_each_sample = config.getboolean(
+            'deactivate_on_each_sample', True)
+        
+        # Create MCU endstop from probe pin
+        ppins = self.printer.lookup_object('pins')
+        pin = config.get('pin')
+        pin_params = ppins.lookup_pin(pin, can_invert=True, can_pullup=True)
+        mcu = pin_params['chip']
+        self.mcu_endstop = mcu.setup_pin('endstop', pin_params)
+        
+        # Wrap MCU endstop methods (required by homing module)
+        self.get_mcu = self.mcu_endstop.get_mcu
+        self.add_stepper = self.mcu_endstop.add_stepper
+        self.get_steppers = self.mcu_endstop.get_steppers
+        self.home_start = self.mcu_endstop.home_start
+        self.home_wait = self.mcu_endstop.home_wait
+        self.query_endstop = self.mcu_endstop.query_endstop
+        
+        # Deploy/stow gcode templates
+        gcode_macro = self.printer.load_object(config, 'gcode_macro')
+        self.activate_gcode = gcode_macro.load_template(
+            config, 'activate_gcode', '')
+        self.deactivate_gcode = gcode_macro.load_template(
+            config, 'deactivate_gcode', '')
+        
+        # Multi-probe state (matches ProbeEndstopWrapper pattern)
+        self.multi = 'OFF'
+        
+        # Tracking
+        self.last_state = False
+        self.last_z_result = 0.
+        
+    def _lower_probe(self):
+        """Deploy probe"""
+        logging.info("dual_probe: Deploying probe '%s'" % self.name)
+        toolhead = self.printer.lookup_object('toolhead')
+        start_pos = toolhead.get_position()
+        self.activate_gcode.run_gcode_from_command()
+        if toolhead.get_position()[:3] != start_pos[:3]:
+            raise self.printer.command_error(
+                "Toolhead moved during probe activate_gcode script")
+    
+    def _raise_probe(self):
+        """Stow probe"""
+        logging.info("dual_probe: Stowing probe '%s'" % self.name)
+        toolhead = self.printer.lookup_object('toolhead')
+        start_pos = toolhead.get_position()
+        self.deactivate_gcode.run_gcode_from_command()
+        if toolhead.get_position()[:3] != start_pos[:3]:
+            raise self.printer.command_error(
+                "Toolhead moved during probe deactivate_gcode script")
+    
+    def multi_probe_begin(self):
+        if self.stow_on_each_sample:
+            return
+        self.multi = 'FIRST'
+    
+    def multi_probe_end(self):
+        if self.stow_on_each_sample:
+            return
+        self._raise_probe()
+        self.multi = 'OFF'
+    
+    def probe_prepare(self, hmove):
+        logging.info("dual_probe: probe_prepare called, multi=%s" % self.multi)
+        if self.multi == 'OFF' or self.multi == 'FIRST':
+            self._lower_probe()
+            if self.multi == 'FIRST':
+                self.multi = 'ON'
+    
+    def probe_finish(self, hmove):
+        logging.info("dual_probe: probe_finish called, multi=%s" % self.multi)
+        if self.multi == 'OFF':
+            self._raise_probe()
+    
+    def get_position_endstop(self):
+        return self.position_endstop
+
+
+class SecondaryProbe:
+    """
+    Secondary probe for T1 toolhead.
+    Mimics Klipper's PrinterProbe / HomingViaProbeHelper interface.
+    
+    Configuration example:
+    [dual_probe t1]
+    pin: ^!HermitCrab2_Board_2_right:gpio24
+    deactivate_on_each_sample: False
+    x_offset: -35
+    y_offset: -27
+    z_offset: 0.750
+    speed: 2.0
+    lift_speed: 15
+    samples: 1
+    sample_retract_dist: 2.0
+    samples_result: median
+    samples_tolerance: 0.100
+    samples_tolerance_retries: 0
+    activate_gcode:
+        SET_PIN PIN=probe_enable_t1 VALUE=1
+        G4 P500
+    deactivate_gcode:
+        SET_PIN PIN=probe_enable_t1 VALUE=0
+    """
+    
+    def __init__(self, config):
+        self.printer = config.get_printer()
+        self.name = config.get_name()
+        self.gcode = self.printer.lookup_object('gcode')
+        
+        # Create endstop wrapper (handles deploy/stow and MCU endstop)
+        self.mcu_probe = SecondaryProbeEndstopWrapper(config)
+        
+        # Probe offsets
+        self.x_offset = config.getfloat('x_offset', 0.)
+        self.y_offset = config.getfloat('y_offset', 0.)
+        self.z_offset = config.getfloat('z_offset', 0.)
+        
+        # Probe parameters
+        self.speed = config.getfloat('speed', 5., above=0.)
+        self.lift_speed = config.getfloat('lift_speed', self.speed, above=0.)
+        self.samples = config.getint('samples', 1, minval=1)
+        self.sample_retract_dist = config.getfloat(
+            'sample_retract_dist', 2., above=0.)
+        self.samples_result = config.getchoice('samples_result',
+            {'median': 'median', 'average': 'average'}, 'median')
+        self.samples_tolerance = config.getfloat(
+            'samples_tolerance', 0.100, minval=0.)
+        self.samples_tolerance_retries = config.getint(
+            'samples_tolerance_retries', 0, minval=0)
+        
+        # Z limits for probing
+        self.z_position = config.getfloat('z_position', -2.)
+        
+        # Tracking
+        self.last_z_result = 0.
+        self.last_probe_position = None
+        
+        # Will be set on connect
+        self.toolhead = None
+        
+        self.printer.register_event_handler(
+            "klippy:connect", self._handle_connect)
+        self.printer.register_event_handler(
+            'klippy:mcu_identify', self._handle_mcu_identify)
+        # Register homing events so probe_prepare/probe_finish are called
+        # at the correct time during probing_move()
+        self.printer.register_event_handler(
+            "homing:homing_move_begin",
+            self._handle_homing_move_begin)
+        self.printer.register_event_handler(
+            "homing:homing_move_end",
+            self._handle_homing_move_end)
+        self.printer.register_event_handler(
+            "gcode:command_error",
+            self._handle_command_error)
+        self.multi_probe_pending = False
+        
+        # Register PROBE_xx and QUERY_PROBE_xx commands
+        # Extract suffix from name: "dual_probe t1" -> "T1"
+        name_parts = self.name.split(None, 1)  # Split on whitespace
+        if len(name_parts) > 1:
+            suffix = name_parts[1].upper()
+        else:
+            suffix = self.name.upper()
+        
+        self.gcode.register_command(
+            'PROBE_%s' % suffix,
+            self.cmd_PROBE,
+            desc="Probe Z-height using %s" % self.name)
+        self.gcode.register_command(
+            'QUERY_PROBE_%s' % suffix,
+            self.cmd_QUERY_PROBE,
+            desc="Query state of %s" % self.name)
+        # Unregister first in case a gcode_macro with same name exists
+        self.gcode.register_command('HOME_Z_%s' % suffix, None)
+        self.gcode.register_command(
+            'HOME_Z_%s' % suffix,
+            self.cmd_HOME_Z,
+            desc="Home Z axis using %s (like G28 Z)" % self.name)
+        self.probe_calibrate_info = None
+        self.gcode.register_command(
+            'PROBE_CALIBRATE_%s' % suffix,
+            self.cmd_PROBE_CALIBRATE,
+            desc="Calibrate z_offset for %s" % self.name)
+        self.gcode.register_command(
+            'PROBE_ACCURACY_%s' % suffix,
+            self.cmd_PROBE_ACCURACY,
+            desc="Probe Z-height accuracy for %s" % self.name)
+        self.gcode.register_command(
+            'Z_OFFSET_APPLY_PROBE_%s' % suffix,
+            self.cmd_Z_OFFSET_APPLY_PROBE,
+            desc="Adjust the z_offset for %s" % self.name)
+        
+        logging.info("dual_probe: Registered PROBE_%s, QUERY_PROBE_%s,"
+                     " HOME_Z_%s, PROBE_CALIBRATE_%s, PROBE_ACCURACY_%s"
+                     % (suffix, suffix, suffix, suffix, suffix))
+    
+    def _handle_connect(self):
+        self.toolhead = self.printer.lookup_object('toolhead')
+    
+    def _handle_mcu_identify(self):
+        # Register Z steppers with this endstop
+        kin = self.printer.lookup_object('toolhead').get_kinematics()
+        z_steppers = []
+        for stepper in kin.get_steppers():
+            if stepper.is_active_axis('z'):
+                self.mcu_probe.add_stepper(stepper)
+                z_steppers.append(stepper.get_name())
+        logging.info("dual_probe: Added %d Z steppers to '%s' endstop: %s"
+                     % (len(z_steppers), self.name, z_steppers))
+    
+    def _handle_homing_move_begin(self, hmove):
+        if self.mcu_probe in hmove.get_mcu_endstops():
+            self.mcu_probe.probe_prepare(hmove)
+    
+    def _handle_homing_move_end(self, hmove):
+        if self.mcu_probe in hmove.get_mcu_endstops():
+            self.mcu_probe.probe_finish(hmove)
+    
+    def _handle_command_error(self):
+        if self.multi_probe_pending:
+            self.multi_probe_pending = False
+            try:
+                self.mcu_probe.multi_probe_end()
+            except:
+                logging.exception("Multi-probe end failed on error")
+    
+    def get_offsets(self, gcmd=None):
+        return self.x_offset, self.y_offset, self.z_offset
+    
+    def get_lift_speed(self, gcmd=None):
+        if gcmd is not None:
+            return gcmd.get_float("LIFT_SPEED", self.lift_speed, above=0.)
+        return self.lift_speed
+    
+    def get_probe_params(self, gcmd=None):
+        if gcmd is None:
+            return {
+                'probe_speed': self.speed,
+                'lift_speed': self.lift_speed,
+                'samples': self.samples,
+                'sample_retract_dist': self.sample_retract_dist,
+                'samples_tolerance': self.samples_tolerance,
+                'samples_tolerance_retries': self.samples_tolerance_retries,
+                'samples_result': self.samples_result,
+            }
+        return {
+            'probe_speed': gcmd.get_float(
+                'PROBE_SPEED', self.speed, above=0.),
+            'lift_speed': gcmd.get_float(
+                'LIFT_SPEED', self.lift_speed, above=0.),
+            'samples': gcmd.get_int(
+                'SAMPLES', self.samples, minval=1),
+            'sample_retract_dist': gcmd.get_float(
+                'SAMPLE_RETRACT_DIST', self.sample_retract_dist, above=0.),
+            'samples_tolerance': gcmd.get_float(
+                'SAMPLES_TOLERANCE', self.samples_tolerance, minval=0.),
+            'samples_tolerance_retries': gcmd.get_int(
+                'SAMPLES_TOLERANCE_RETRIES',
+                self.samples_tolerance_retries, minval=0),
+            'samples_result': gcmd.get(
+                'SAMPLES_RESULT', self.samples_result),
+        }
+    
+    def _probe_single(self, gcmd, speed):
+        """Run a single probe using homing module's probing_move"""
+        toolhead = self.printer.lookup_object('toolhead')
+        curtime = self.printer.get_reactor().monotonic()
+        if 'z' not in toolhead.get_status(curtime)['homed_axes']:
+            raise self.printer.command_error("Must home before probe")
+        
+        pos = toolhead.get_position()
+        logging.info("dual_probe: _probe_single start pos=%.3f,%.3f,%.3f"
+                     " target_z=%.3f speed=%.1f"
+                     % (pos[0], pos[1], pos[2], self.z_position, speed))
+        pos[2] = self.z_position  # Target Z (how far down to probe)
+        
+        phoming = self.printer.lookup_object('homing')
+        # probing_move expects the endstop wrapper with
+        # probe_prepare/probe_finish methods
+        curpos = phoming.probing_move(self.mcu_probe, pos, speed)
+        
+        logging.info("dual_probe: probing_move returned pos=%.3f,%.3f,%.6f"
+                     % (curpos[0], curpos[1], curpos[2]))
+        
+        # Create ProbeResult
+        bed_x = curpos[0] + self.x_offset
+        bed_y = curpos[1] + self.y_offset
+        bed_z = curpos[2]
+        result = ProbeResult(
+            bed_x=bed_x, bed_y=bed_y, bed_z=bed_z,
+            test_x=curpos[0], test_y=curpos[1], test_z=curpos[2])
+        
+        logging.info("dual_probe: probe result bed=%.3f,%.3f,%.6f"
+                     % (bed_x, bed_y, bed_z))
+        self.gcode.respond_info(
+            "%s: at %.3f,%.3f bed will contact at z=%.6f"
+            % (self.name, bed_x, bed_y, bed_z))
+        
+        return result
+    
+    def start_probe_session(self, gcmd):
+        """Start probe session - returns a session helper"""
+        return SecondaryProbeSession(self, gcmd)
+    
+    def get_status(self, eventtime):
+        return {
+            'name': self.name,
+            'last_z_result': self.last_z_result,
+            'last_probe_position': self.last_probe_position,
+        }
+    
+    # G-Code commands
+    def cmd_PROBE(self, gcmd):
+        """PROBE_T1 command - probe at current position"""
+        logging.info("dual_probe: PROBE_%s command called" % self.name)
+        params = self.get_probe_params(gcmd)
+        logging.info("dual_probe: probe params: speed=%.1f samples=%d"
+                     " retract=%.1f tolerance=%.3f"
+                     % (params['probe_speed'], params['samples'],
+                        params['sample_retract_dist'],
+                        params['samples_tolerance']))
+        
+        self.mcu_probe.multi_probe_begin()
+        try:
+            results = []
+            retries = 0
+            sample_count = params['samples']
+            toolhead = self.printer.lookup_object('toolhead')
+            
+            while len(results) < sample_count:
+                result = self._probe_single(gcmd, params['probe_speed'])
+                results.append(result)
+                
+                # Check tolerance
+                z_vals = [r.bed_z for r in results]
+                if (max(z_vals) - min(z_vals)
+                        > params['samples_tolerance']):
+                    if retries >= params['samples_tolerance_retries']:
+                        raise gcmd.error(
+                            "Probe samples exceed samples_tolerance")
+                    gcmd.respond_info(
+                        "Probe samples exceed tolerance. Retrying...")
+                    retries += 1
+                    results = []
+                
+                # Retract between samples
+                if len(results) < sample_count:
+                    cur_z = toolhead.get_position()[2]
+                    toolhead.manual_move(
+                        [None, None, cur_z + params['sample_retract_dist']],
+                        params['lift_speed'])
+        finally:
+            self.mcu_probe.multi_probe_end()
+        
+        # Calculate final result
+        if params['samples_result'] == 'median':
+            results.sort(key=lambda r: r.bed_z)
+            final = results[len(results) // 2]
+        else:
+            avg_z = sum([r.bed_z for r in results]) / len(results)
+            final = ProbeResult(
+                bed_x=results[0].bed_x, bed_y=results[0].bed_y,
+                bed_z=avg_z,
+                test_x=results[0].test_x, test_y=results[0].test_y,
+                test_z=avg_z)
+        
+        self.last_z_result = final.bed_z
+        self.last_probe_position = self.gcode.Coord(
+            final.bed_x, final.bed_y, final.bed_z, 0.)
+        
+        logging.info("dual_probe: PROBE_%s complete: z=%.6f at %.3f,%.3f"
+                     % (self.name, final.bed_z, final.bed_x, final.bed_y))
+        gcmd.respond_info(
+            "Result: at %.3f,%.3f estimate contact at z=%.6f"
+            % (final.bed_x, final.bed_y, final.bed_z))
+    
+    def cmd_QUERY_PROBE(self, gcmd):
+        """QUERY_PROBE_T1 command"""
+        toolhead = self.printer.lookup_object('toolhead')
+        print_time = toolhead.get_last_move_time()
+        res = self.mcu_probe.query_endstop(print_time)
+        self.mcu_probe.last_state = res
+        state_str = ["open", "TRIGGERED"][not not res]
+        logging.info("dual_probe: QUERY_PROBE_%s: %s" % (self.name, state_str))
+        gcmd.respond_info(
+            "%s: %s" % (self.name, state_str))
+    
+    def cmd_HOME_Z(self, gcmd):
+        """HOME_Z_T1 command - Home Z using secondary probe.
+        Mimics stock G28 Z: probes down, sets Z=position_endstop at
+        trigger point, so Z=0 = bed surface. No SET_KINEMATIC_POSITION
+        artifacts in the result."""
+        logging.info("dual_probe: HOME_Z_%s command called" % self.name)
+        toolhead = self.printer.lookup_object('toolhead')
+        phoming = self.printer.lookup_object('homing')
+        
+        # Parameters (overridable from gcode)
+        probe_speed = gcmd.get_float('PROBE_SPEED', self.speed, above=0.)
+        slow_speed = gcmd.get_float('SLOW_SPEED',
+                                     max(probe_speed / 2., 1.), above=0.)
+        retract_dist = gcmd.get_float('RETRACT',
+                                       self.sample_retract_dist, above=0.)
+        samples = gcmd.get_int('SAMPLES', self.samples, minval=1)
+        samples_tolerance = gcmd.get_float('SAMPLES_TOLERANCE',
+                                            self.samples_tolerance, minval=0.)
+        samples_retries = gcmd.get_int('SAMPLES_TOLERANCE_RETRIES',
+                                        self.samples_tolerance_retries,
+                                        minval=0)
+        samples_result = gcmd.get('SAMPLES_RESULT', self.samples_result)
+        
+        # Deploy probe
+        self.mcu_probe.multi_probe_begin()
+        try:
+            # --- First fast probe to find approximate bed position ---
+            pos = toolhead.get_position()
+            pos[2] = self.z_position  # Target Z limit
+            curpos = phoming.probing_move(self.mcu_probe, pos, probe_speed)
+            
+            # Set Z = z_offset at trigger (exactly like stock homing)
+            curpos[2] = self.z_offset
+            toolhead.set_position(curpos)
+            gcmd.respond_info(
+                "HOME_Z %s: fast probe contact, Z set to %.3f"
+                % (self.name, self.z_offset))
+            
+            # --- Retract for second pass ---
+            liftpos = toolhead.get_position()
+            liftpos[2] += retract_dist
+            toolhead.manual_move(liftpos, self.lift_speed)
+            
+            # --- Accurate slow probe(s) ---
+            results = []
+            retries = 0
+            while len(results) < samples:
+                pos = toolhead.get_position()
+                pos[2] = self.z_position
+                curpos = phoming.probing_move(
+                    self.mcu_probe, pos, slow_speed)
+                
+                # Set Z = z_offset at trigger
+                curpos[2] = self.z_offset
+                toolhead.set_position(curpos)
+                results.append(self.z_offset)
+                
+                # Check tolerance
+                if (max(results) - min(results)) > samples_tolerance:
+                    if retries >= samples_retries:
+                        raise gcmd.error(
+                            "HOME_Z %s: samples exceed tolerance"
+                            % self.name)
+                    gcmd.respond_info(
+                        "HOME_Z %s: tolerance exceeded, retrying..."
+                        % self.name)
+                    retries += 1
+                    results = []
+                
+                # Retract between samples (except last)
+                if len(results) < samples:
+                    liftpos = toolhead.get_position()
+                    liftpos[2] += retract_dist
+                    toolhead.manual_move(liftpos, self.lift_speed)
+            
+            # Final: set Z = z_offset at bed contact
+            # (already set by last set_position, but be explicit)
+            final_pos = toolhead.get_position()
+            final_pos[2] = self.z_offset
+            toolhead.set_position(final_pos)
+            
+            self.last_z_result = self.z_offset
+            gcmd.respond_info(
+                "HOME_Z %s: complete. Z=%.3f at probe contact "
+                "(Z=0 is bed surface)" % (self.name, self.z_offset))
+            logging.info(
+                "dual_probe: HOME_Z_%s complete. Z=%.3f"
+                % (self.name, self.z_offset))
+        
+        finally:
+            # Stow probe
+            self.mcu_probe.multi_probe_end()
+    
+    def _run_single_probe(self, gcmd):
+        """Run a single probe using probe session (for calibrate/accuracy)"""
+        probe_session = self.start_probe_session(gcmd)
+        probe_session.run_probe(gcmd)
+        pos = probe_session.pull_probed_results()[0]
+        probe_session.end_probe_session()
+        return pos
+    
+    def _move(self, coord, speed):
+        self.printer.lookup_object('toolhead').manual_move(coord, speed)
+    
+    def cmd_PROBE_CALIBRATE(self, gcmd):
+        """PROBE_CALIBRATE_T1 - Calibrate z_offset using paper test.
+        1. Probes to find bed
+        2. Lifts and moves nozzle over contact point
+        3. Starts manual Z probe (TESTZ/ACCEPT/ABORT)
+        4. Calculates and saves new z_offset"""
+        manual_probe = self.printer.lookup_object('manual_probe', None)
+        if manual_probe is None:
+            raise gcmd.error("manual_probe module not loaded")
+        # Verify no manual probe already in progress
+        from . import manual_probe as mp_module
+        mp_module.verify_no_manual_probe(self.printer)
+        
+        params = self.get_probe_params(gcmd)
+        
+        # Perform initial probe
+        ppos = self._run_single_probe(gcmd)
+        
+        # Move away from the bed
+        curpos = self.printer.lookup_object('toolhead').get_position()
+        curpos[2] += 5.
+        self._move(curpos, params['lift_speed'])
+        
+        # Move the nozzle over the probe contact point
+        curpos[0] = ppos.bed_x
+        curpos[1] = ppos.bed_y
+        self._move(curpos, params['probe_speed'])
+        
+        # Start manual probe (paper test)
+        self.probe_calibrate_info = (ppos, self.get_offsets())
+        gcmd.respond_info(
+            "%s: Starting z_offset calibration.\n"
+            "Use TESTZ to adjust, ACCEPT to save, ABORT to cancel."
+            % self.name)
+        mp_module.ManualProbeHelper(self.printer, gcmd,
+                                    self._probe_calibrate_finalize)
+    
+    def _probe_calibrate_finalize(self, mpresult):
+        """Called when user ACCEPTs the manual probe position"""
+        if mpresult is None:
+            return
+        ppos, offsets = self.probe_calibrate_info
+        # manual_probe returns a kinematic position sequence (x, y, z),
+        # not a ProbeResult object.
+        manual_z = mpresult[2]
+        # Match stock Klipper probe calibration math:
+        # new_z_offset = probe_trigger_z - manual_nozzle_touch_z
+        z_offset = ppos.bed_z - manual_z
+        self.gcode.respond_info(
+            "%s: z_offset: %.3f\n"
+            "The SAVE_CONFIG command will update the printer config file\n"
+            "with the above and restart the printer." % (self.name, z_offset))
+        configfile = self.printer.lookup_object('configfile')
+        configfile.set(self.name, 'z_offset', "%.3f" % (z_offset,))
+    
+    def cmd_PROBE_ACCURACY(self, gcmd):
+        """PROBE_ACCURACY_T1 - Test probe repeatability"""
+        params = self.get_probe_params(gcmd)
+        sample_count = gcmd.get_int("SAMPLES", 10, minval=1)
+        toolhead = self.printer.lookup_object('toolhead')
+        start_pos = toolhead.get_position()
+        gcmd.respond_info(
+            "PROBE_ACCURACY_%s at X:%.3f Y:%.3f Z:%.3f"
+            " (samples=%d retract=%.3f"
+            " speed=%.1f lift_speed=%.1f)"
+            % (self.name.split(None, 1)[-1].upper() if ' ' in self.name
+               else self.name.upper(),
+               start_pos[0], start_pos[1], start_pos[2],
+               sample_count, params['sample_retract_dist'],
+               params['probe_speed'], params['lift_speed']))
+        # Create dummy gcmd with SAMPLES=1
+        fo_params = dict(gcmd.get_command_parameters())
+        fo_params['SAMPLES'] = '1'
+        fo_gcmd = self.gcode.create_gcode_command("", "", fo_params)
+        # Probe bed sample_count times
+        probe_session = self.start_probe_session(fo_gcmd)
+        probe_num = 0
+        while probe_num < sample_count:
+            probe_session.run_probe(fo_gcmd)
+            probe_num += 1
+            # Retract
+            lift_z = toolhead.get_position()[2] + params['sample_retract_dist']
+            liftpos = [start_pos[0], start_pos[1], lift_z]
+            self._move(liftpos, params['lift_speed'])
+        positions = probe_session.pull_probed_results()
+        probe_session.end_probe_session()
+        # Calculate statistics
+        z_vals = [p.bed_z for p in positions]
+        max_value = max(z_vals)
+        min_value = min(z_vals)
+        range_value = max_value - min_value
+        avg_value = sum(z_vals) / len(z_vals)
+        z_sorted = sorted(z_vals)
+        median = z_sorted[len(z_sorted) // 2]
+        # Standard deviation
+        deviation_sum = sum(pow(z - avg_value, 2.) for z in z_vals)
+        sigma = math.sqrt(deviation_sum / len(z_vals))
+        gcmd.respond_info(
+            "probe accuracy results: maximum %.6f, minimum %.6f, "
+            "range %.6f, average %.6f, median %.6f, "
+            "standard deviation %.6f"
+            % (max_value, min_value, range_value,
+               avg_value, median, sigma))
+    
+    def cmd_Z_OFFSET_APPLY_PROBE(self, gcmd):
+        """Z_OFFSET_APPLY_PROBE_T1 - Apply current gcode Z offset to z_offset"""
+        gcode_move = self.printer.lookup_object("gcode_move")
+        offset = gcode_move.get_status()['homing_origin'].z
+        if offset == 0:
+            gcmd.respond_info("Nothing to do: Z Offset is 0")
+            return
+        # Match stock Klipper sign convention.
+        z_offset = self.z_offset - offset
+        gcmd.respond_info(
+            "%s: z_offset: %.3f\n"
+            "The SAVE_CONFIG command will update the printer config file\n"
+            "with the above and restart the printer." % (self.name, z_offset))
+        configfile = self.printer.lookup_object('configfile')
+        configfile.set(self.name, 'z_offset', "%.3f" % (z_offset,))
+
+
+class SecondaryProbeSession:
+    """
+    Probe session for SecondaryProbe.
+    Matches Klipper's ProbeSessionHelper interface:
+    - start_probe_session(gcmd)
+    - run_probe(gcmd)
+    - pull_probed_results()
+    - end_probe_session()
+    """
+    def __init__(self, probe, gcmd):
+        self.probe = probe
+        self.gcmd = gcmd
+        self.results = []
+        self.probe.mcu_probe.multi_probe_begin()
+    
+    def start_probe_session(self, gcmd):
+        return self
+    
+    def run_probe(self, gcmd):
+        """Perform probing with configured samples"""
+        params = self.probe.get_probe_params(gcmd)
+        toolhead = self.probe.printer.lookup_object('toolhead')
+        probexy = toolhead.get_position()[:2]
+        
+        retries = 0
+        positions = []
+        sample_count = params['samples']
+        
+        while len(positions) < sample_count:
+            pos = self.probe._probe_single(gcmd, params['probe_speed'])
+            positions.append(pos)
+            
+            # Check tolerance
+            z_vals = [p.bed_z for p in positions]
+            if (max(z_vals) - min(z_vals)
+                    > params['samples_tolerance']):
+                if retries >= params['samples_tolerance_retries']:
+                    raise gcmd.error(
+                        "Probe samples exceed samples_tolerance")
+                gcmd.respond_info(
+                    "Probe samples exceed tolerance. Retrying...")
+                retries += 1
+                positions = []
+            
+            # Retract between samples
+            if len(positions) < sample_count:
+                cur_z = toolhead.get_position()[2]
+                toolhead.manual_move(
+                    probexy + [cur_z + params['sample_retract_dist']],
+                    params['lift_speed'])
+        
+        # Calculate final result
+        if params['samples_result'] == 'median':
+            positions.sort(key=lambda r: r.bed_z)
+            final = positions[len(positions) // 2]
+        else:
+            avg_z = sum([r.bed_z for r in positions]) / len(positions)
+            final = ProbeResult(
+                bed_x=positions[0].bed_x, bed_y=positions[0].bed_y,
+                bed_z=avg_z,
+                test_x=positions[0].test_x, test_y=positions[0].test_y,
+                test_z=avg_z)
+        
+        self.results.append(final)
+        self.probe.last_z_result = final.bed_z
+    
+    def pull_probed_results(self):
+        res = self.results
+        self.results = []
+        return res
+    
+    def end_probe_session(self):
+        self.probe.mcu_probe.multi_probe_end()
+        self.results = []
+
+
+class DualProbeManager:
+    """
+    Manages two probes for T0 and T1 toolheads.
+    Provides unified interface for dual_bed_mesh.
+    
+    Configuration example:
+    [dual_probe]
+    t0_probe: probe
+    t1_probe: dual_probe t1
+    auto_switch: True
+    """
+    
+    def __init__(self, config):
+        self.printer = config.get_printer()
+        self.name = config.get_name()
+        self.gcode = self.printer.lookup_object('gcode')
+        
+        # Probe section names
+        self.t0_probe_name = config.get('t0_probe', 'probe')
+        self.t1_probe_name = config.get('t1_probe', 'dual_probe t1')
+        
+        # Auto-switch behavior
+        self.auto_switch = config.getboolean('auto_switch', True)
+        
+        # Probe objects (populated on connect)
+        self.t0_probe = None
+        self.t1_probe = None
+        self.dual_carriage = None
+        self.toolhead = None
+        
+        # Current active probe
+        self.active_probe_id = 0
+        
+        # Register event handlers
+        self.printer.register_event_handler(
+            "klippy:connect", self._handle_connect)
+        
+        # Register commands
+        self.gcode.register_command(
+            'DUAL_PROBE_SELECT', self.cmd_DUAL_PROBE_SELECT,
+            desc="Select active probe (T0 or T1)")
+        self.gcode.register_command(
+            'DUAL_PROBE_STATUS', self.cmd_DUAL_PROBE_STATUS,
+            desc="Show dual probe status")
+        self.gcode.register_command(
+            'DUAL_PROBE_CALIBRATE', self.cmd_DUAL_PROBE_CALIBRATE,
+            desc="Calibrate Z offset between T0 and T1 probes")
+    
+    def _handle_connect(self):
+        self.toolhead = self.printer.lookup_object('toolhead')
+        
+        # Look up T0 probe
+        try:
+            self.t0_probe = self.printer.lookup_object(self.t0_probe_name)
+            logging.info("dual_probe: T0 probe '%s' found" 
+                         % self.t0_probe_name)
+        except Exception as e:
+            logging.warning("dual_probe: T0 probe '%s' not found: %s"
+                            % (self.t0_probe_name, e))
+        
+        # Look up T1 probe
+        try:
+            self.t1_probe = self.printer.lookup_object(self.t1_probe_name)
+            logging.info("dual_probe: T1 probe '%s' found" 
+                         % self.t1_probe_name)
+        except Exception as e:
+            logging.info("dual_probe: T1 probe '%s' not found, "
+                         "will use T0 for both" % self.t1_probe_name)
+        
+        # Look up dual carriage
+        try:
+            self.dual_carriage = self.printer.lookup_object('dual_carriage')
+        except:
+            self.dual_carriage = None
+    
+    def get_probe(self, carriage_id=None):
+        """Get probe for specified carriage"""
+        if carriage_id is None:
+            carriage_id = self._get_active_carriage()
+        if carriage_id == 1 and self.t1_probe is not None:
+            return self.t1_probe
+        return self.t0_probe
+    
+    def get_probe_offsets(self, carriage_id=None):
+        probe = self.get_probe(carriage_id)
+        if probe is None:
+            return (0., 0., 0.)
+        return probe.get_offsets()
+    
+    def _get_active_carriage(self):
+        if self.dual_carriage is None:
+            return 0
+        dc_status = self.dual_carriage.get_status(
+            self.printer.get_reactor().monotonic())
+        active = dc_status.get('active_carriage', 'CARRIAGE_0')
+        return 0 if active == 'CARRIAGE_0' else 1
+    
+    def _switch_to_carriage(self, carriage_id):
+        self.gcode.run_script_from_command(
+            "SET_DUAL_CARRIAGE CARRIAGE=%d" % carriage_id)
+        extruder = 'extruder' if carriage_id == 0 else 'extruder1'
+        self.gcode.run_script_from_command(
+            "ACTIVATE_EXTRUDER EXTRUDER=%s" % extruder)
+        self.active_probe_id = carriage_id
+    
+    def cmd_DUAL_PROBE_SELECT(self, gcmd):
+        carriage = gcmd.get_int('T', None)
+        if carriage is None:
+            gcmd.respond_info(
+                "Active probe: T%d" % self.active_probe_id)
+            return
+        if carriage not in [0, 1]:
+            raise gcmd.error("T must be 0 or 1")
+        self._switch_to_carriage(carriage)
+        gcmd.respond_info("Switched to T%d probe" % carriage)
+    
+    def cmd_DUAL_PROBE_STATUS(self, gcmd):
+        gcmd.respond_info("=== Dual Probe Status ===")
+        gcmd.respond_info(
+            "  Active carriage: T%d" % self._get_active_carriage())
+        gcmd.respond_info(
+            "  Active probe: T%d" % self.active_probe_id)
+        gcmd.respond_info(
+            "  Auto-switch: %s" % self.auto_switch)
+        
+        if self.t0_probe:
+            offsets = self.t0_probe.get_offsets()
+            gcmd.respond_info(
+                "  T0 probe (%s): X=%.2f Y=%.2f Z=%.3f"
+                % (self.t0_probe_name,
+                   offsets[0], offsets[1], offsets[2]))
+        else:
+            gcmd.respond_info("  T0 probe: NOT FOUND")
+        
+        if self.t1_probe:
+            offsets = self.t1_probe.get_offsets()
+            gcmd.respond_info(
+                "  T1 probe (%s): X=%.2f Y=%.2f Z=%.3f"
+                % (self.t1_probe_name,
+                   offsets[0], offsets[1], offsets[2]))
+        else:
+            gcmd.respond_info("  T1 probe: NOT CONFIGURED")
+    
+    def cmd_DUAL_PROBE_CALIBRATE(self, gcmd):
+        """Probe same point with both probes, report Z difference"""
+        if self.t0_probe is None:
+            raise gcmd.error("T0 probe not configured")
+        if self.t1_probe is None:
+            raise gcmd.error("T1 probe not configured")
+        
+        x = gcmd.get_float('X', 400.)
+        y = gcmd.get_float('Y', 400.)
+        
+        gcmd.respond_info(
+            "Calibrating probe Z difference at X=%.1f Y=%.1f" % (x, y))
+        
+        toolhead = self.printer.lookup_object('toolhead')
+        curtime = self.printer.get_reactor().monotonic()
+        if 'xyz' not in toolhead.get_status(curtime)['homed_axes']:
+            raise gcmd.error("Must home first")
+        
+        # Probe with T0
+        gcmd.respond_info("Probing with T0...")
+        self._switch_to_carriage(0)
+        t0_offsets = self.t0_probe.get_offsets()
+        toolhead.manual_move(
+            [x - t0_offsets[0], y - t0_offsets[1], None], 50.)
+        toolhead.manual_move([None, None, 5.], 50.)
+        toolhead.wait_moves()
+        
+        from . import probe as probe_module
+        pos0 = normalize_probe_result(
+            self.t0_probe, probe_module.run_single_probe(self.t0_probe, gcmd))
+        z_t0 = pos0.bed_z
+        gcmd.respond_info("  T0 result: Z=%.4f" % z_t0)
+        
+        toolhead.manual_move([None, None, 10.], 50.)
+        toolhead.wait_moves()
+        
+        # Probe with T1
+        gcmd.respond_info("Probing with T1...")
+        self._switch_to_carriage(1)
+        t1_offsets = self.t1_probe.get_offsets()
+        toolhead.manual_move(
+            [x - t1_offsets[0], y - t1_offsets[1], None], 50.)
+        toolhead.manual_move([None, None, 5.], 50.)
+        toolhead.wait_moves()
+        
+        pos1 = normalize_probe_result(
+            self.t1_probe, probe_module.run_single_probe(self.t1_probe, gcmd))
+        z_t1 = pos1.bed_z
+        gcmd.respond_info("  T1 result: Z=%.4f" % z_t1)
+        
+        diff = z_t1 - z_t0
+        gcmd.respond_info(
+            "\nZ difference (T1 - T0): %+.4f mm" % diff)
+        
+        # Return to T0
+        self._switch_to_carriage(0)
+        toolhead.manual_move([None, None, 10.], 50.)
+    
+    def get_status(self, eventtime):
+        return {
+            't0_probe_available': self.t0_probe is not None,
+            't1_probe_available': self.t1_probe is not None,
+            'active_probe_id': self.active_probe_id,
+            'auto_switch': self.auto_switch,
+        }
+
+
+def load_config(config):
+    return DualProbeManager(config)
+
+def load_config_prefix(config):
+    # Handles [dual_probe t1] or similar sections
+    # Klipper calls this for any [dual_probe XXX] section
+    return SecondaryProbe(config)
