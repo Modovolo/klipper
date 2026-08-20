@@ -10,6 +10,7 @@ import logging
 import math
 import json
 import collections
+from . import probe as probe_module
 
 PROFILE_VERSION = 1
 
@@ -347,6 +348,12 @@ class DualBedMeshCalibrate:
     def _switch_carriage(self, carriage_id, vlog):
         """Switch to specified carriage"""
         vlog.debug(f"Switching to carriage {carriage_id}")
+        # Park the opposite carriage first to reduce safe_distance conflicts.
+        park_macro = 'PARK_T1' if carriage_id == 0 else 'PARK_T0'
+        try:
+            self.gcode.run_script_from_command(park_macro)
+        except Exception:
+            vlog.debug(f"Optional parking macro '{park_macro}' not available")
         self.gcode.run_script_from_command(
             f"SET_DUAL_CARRIAGE CARRIAGE={carriage_id}")
         extruder = 'extruder' if carriage_id == 0 else 'extruder1'
@@ -360,27 +367,26 @@ class DualBedMeshCalibrate:
         if probe is None:
             raise self.gcode.error(f"No probe available for T{carriage_id}")
             
-        offsets = probe.get_offsets()
+        offsets = probe.get_offsets(vlog.gcmd)
         probe_x = x - offsets[0]
         probe_y = y - offsets[1]
         
         vlog.debug(f"Probing ({x:.1f}, {y:.1f}) with T{carriage_id} "
                    f"[probe pos: ({probe_x:.1f}, {probe_y:.1f})]")
         
-        # Move to position at safe height
-        self.toolhead.manual_move([probe_x, probe_y, None], self.speed)
+        # Move to safe Z first, then travel in XY.
         self.toolhead.manual_move([None, None, self.horizontal_move_z], self.speed)
+        self.toolhead.manual_move([probe_x, probe_y, None], self.speed)
         self.toolhead.wait_moves()
         
         # Run probe using Klipper's probe API
-        curpos = self.toolhead.get_position()
         try:
-            curpos = probe.run_probe(vlog.gcmd)
+            curpos = probe_module.run_single_probe(probe, vlog.gcmd)
         except Exception as e:
-            vlog.warn(f"Probe failed at ({x:.1f}, {y:.1f}): {e}")
-            return 0.
-            
-        z_result = curpos[2]
+            raise self.gcode.error(
+                f"Probe failed at ({x:.1f}, {y:.1f}) with T{carriage_id}: {e}")
+
+        z_result = curpos.bed_z if hasattr(curpos, 'bed_z') else curpos[2]
         vlog.debug(f"  Result: Z={z_result:.4f}")
         
         # Retract
