@@ -1,0 +1,629 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BFP Dual Mesh Lab</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #1d2926;
+      --muted: #65736d;
+      --line: #d9e0da;
+      --paper: #f2f5f0;
+      --white: #fff;
+      --teal: #176e68;
+      --coral: #c64f3d;
+      --lime: #b6cb68;
+      --amber: #edbd67;
+      --danger: #a5342e;
+      --shadow: 0 12px 36px rgba(29, 41, 38, .07);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(ellipse at 8% 0%, rgba(182, 203, 104, .16), transparent 30rem),
+        linear-gradient(135deg, #f6f7f2 0%, #eef3ef 100%);
+      color: var(--ink);
+      font-family: "Avenir Next", "Segoe UI", sans-serif;
+      font-size: 14px;
+    }
+    button, input, select { font: inherit; }
+    .shell { max-width: 1440px; margin: 0 auto; padding: 30px 36px 40px; }
+    header {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 20px;
+      margin-bottom: 24px;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 22px;
+    }
+    .eyebrow, .section-label, .metric-label, .axis-caption {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    h1 {
+      margin: 5px 0 0;
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: 34px;
+      font-weight: 500;
+      line-height: 1.05;
+    }
+    .machine-state {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      padding: 9px 12px;
+      border: 1px solid #d4dfd3;
+      background: rgba(255,255,255,.65);
+      color: #395047;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .machine-state::before { flex:0 0 auto; }
+    .machine-state.live::before { background:#176e68; }
+    .machine-state.warning::before { background:#d18c38; }
+    .machine-state.error::before { background:var(--danger); }
+    .header-actions { display:flex; align-items:center; gap:12px; }
+    .mode-switch { display:flex; align-items:center; gap:8px; color:var(--muted); font-size:10px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; }
+    .mode-switch select { min-width:150px; padding:9px 10px; border:1px solid #cbd5ce; border-radius:2px; background:#fff; color:var(--ink); font-size:12px; letter-spacing:0; text-transform:none; }
+    .connection-panel { display:grid; grid-template-columns:minmax(200px,1.4fr) minmax(150px,.8fr) minmax(180px,1fr) auto; align-items:end; gap:12px; margin:-8px 0 24px; padding:15px; border:1px solid var(--line); background:rgba(255,255,255,.72); }
+    .connection-panel[hidden] { display:none; }
+    .connection-panel label { display:grid; gap:5px; color:var(--muted); font-size:10px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; }
+    .connection-panel input { min-width:0; width:100%; height:36px; padding:7px 9px; border:1px solid #cbd5ce; border-radius:2px; background:#fff; color:var(--ink); font-size:12px; letter-spacing:0; text-transform:none; }
+    .connection-panel button { height:36px; padding:0 16px; border:0; border-radius:2px; background:var(--teal); color:#fff; font-weight:700; cursor:pointer; }
+    .connection-panel button:hover { background:#105853; }
+    .connection-panel button:focus-visible, .mode-switch select:focus-visible, .connection-panel input:focus-visible { outline:2px solid #176e68; outline-offset:2px; }
+    .machine-state::before {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #6b9b4a;
+      content: "";
+    }
+    main { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(330px, .75fr); gap: 30px; }
+    .visual-column, .control-column { min-width: 0; }
+    .section-head { display:flex; align-items:baseline; justify-content:space-between; gap: 12px; margin-bottom: 12px; }
+    .section-head h2 { margin:0; font-size: 16px; font-weight: 700; }
+    .section-head p { margin:0; color:var(--muted); font-size:12px; }
+    .plot-wrap {
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,.86);
+      box-shadow: var(--shadow);
+      padding: 14px;
+    }
+    canvas { display:block; width:100%; aspect-ratio: 1.35; touch-action:none; cursor:crosshair; }
+    .plot-footer { display:flex; align-items:center; justify-content:space-between; gap: 14px; padding: 10px 4px 0; color:var(--muted); font-size:11px; }
+    .legend { display:flex; align-items:center; gap:14px; }
+    .legend span { display:inline-flex; align-items:center; gap:6px; }
+    .swatch { width:9px; height:9px; display:inline-block; border-radius:50%; }
+    .swatch.t0 { background:var(--coral); }
+    .swatch.t1 { background:var(--teal); }
+    .metrics { display:grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap:1px; margin-top:17px; background:var(--line); border:1px solid var(--line); }
+    .metric { min-width:0; padding:13px 14px 12px; background:rgba(255,255,255,.9); }
+    .metric-label { display:block; font-size:10px; }
+    .metric-value { display:block; margin-top:7px; font: 600 20px/1.1 ui-monospace, SFMono-Regular, Consolas, monospace; font-variant-numeric: tabular-nums; white-space:nowrap; }
+    .metric-note { display:block; margin-top:5px; color:var(--muted); font-size:11px; }
+    .motor-strip { margin-top:17px; padding:16px 17px; background:#23312d; color:#f0f4ef; }
+    .motor-title { display:flex; justify-content:space-between; gap:12px; color:#b7c6be; font-size:11px; text-transform:uppercase; letter-spacing:.08em; font-weight:700; }
+    .motor-values { display:grid; grid-template-columns:1fr 1fr; gap:20px; margin-top:14px; }
+    .motor-side { border-left:2px solid var(--lime); padding-left:11px; }
+    .motor-side.right { border-color:#ef8b73; }
+    .motor-side span { display:block; color:#b7c6be; font-size:11px; }
+    .motor-side strong { display:block; margin-top:5px; font:500 19px ui-monospace, SFMono-Regular, Consolas, monospace; font-variant-numeric:tabular-nums; }
+    .motor-position-line { margin-top:12px; padding-top:10px; border-top:1px solid rgba(255,255,255,.16); color:#b7c6be; font:11px ui-monospace, SFMono-Regular, Consolas, monospace; font-variant-numeric:tabular-nums; }
+    .condition { margin-top:16px; min-height:42px; padding:11px 13px; border-left:3px solid var(--teal); background:rgba(255,255,255,.7); color:#3d5148; font-size:12px; }
+    .condition.error { border-color:var(--danger); color:var(--danger); background:#fff4f1; }
+    .control-column { border-left:1px solid var(--line); padding-left:25px; }
+    .control-section { padding:0 0 19px; margin-bottom:18px; border-bottom:1px solid var(--line); }
+    .control-section:last-child { border:0; margin:0; }
+    .control-section h3 { display:flex; align-items:center; justify-content:space-between; margin:0 0 13px; font-size:13px; }
+    .control-section h3 small { color:var(--muted); font-size:11px; font-weight:500; }
+    .slider-row { margin:12px 0 0; }
+    .slider-label { display:flex; justify-content:space-between; align-items:baseline; gap:10px; margin-bottom:5px; }
+    .slider-label label { color:#35443e; font-size:12px; }
+    output { color:var(--ink); font:600 12px ui-monospace, SFMono-Regular, Consolas, monospace; font-variant-numeric:tabular-nums; }
+    input[type="range"] { display:block; width:100%; height:18px; margin:0; accent-color:var(--teal); cursor:pointer; }
+    .range-limits { display:flex; justify-content:space-between; color:#87938d; font:10px ui-monospace, SFMono-Regular, Consolas, monospace; }
+    select {
+      width:100%; padding:9px 10px; border:1px solid #cbd5ce; border-radius:2px;
+      background:#fff; color:var(--ink); outline-color:var(--teal);
+    }
+    .scenario-note { margin:9px 0 0; color:var(--muted); font-size:11px; line-height:1.5; }
+    .small-grid { display:grid; grid-template-columns:1fr 1fr; gap:0 16px; }
+    .safety-line { display:flex; justify-content:space-between; gap:10px; padding:7px 0; border-bottom:1px solid rgba(217,224,218,.7); font-size:12px; }
+    .safety-line:last-child { border:0; }
+    .safety-line span { color:var(--muted); }
+    .safety-line strong { font:600 12px ui-monospace, SFMono-Regular, Consolas, monospace; }
+    @media (max-width: 940px) {
+      .shell { padding:22px 20px 32px; }
+      main { grid-template-columns:minmax(0,1fr); gap:24px; }
+      .control-column { border:0; border-top:1px solid var(--line); padding:22px 0 0; }
+      .connection-panel { grid-template-columns:1fr 1fr; }
+    }
+    @media (max-width: 560px) {
+      .shell { padding:18px 13px 26px; }
+      header { align-items:flex-start; flex-direction:column; padding-bottom:15px; }
+      .header-actions { width:100%; justify-content:space-between; flex-wrap:wrap; }
+      .connection-panel { grid-template-columns:1fr; }
+      h1 { font-size:29px; }
+      .machine-state { align-self:flex-start; }
+      .section-head { align-items:flex-start; flex-direction:column; gap:4px; }
+      .plot-wrap { padding:7px; }
+      canvas { aspect-ratio:1.08; }
+      .plot-footer { align-items:flex-start; flex-direction:column; }
+      .metrics { grid-template-columns:repeat(2,minmax(0,1fr)); }
+      .metric-value { font-size:17px; }
+      .small-grid { grid-template-columns:1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header>
+      <div>
+        <div class="eyebrow">BFP 8 / Engineering bench</div>
+        <h1>Dual Mesh Lab</h1>
+      </div>
+      <div class="header-actions">
+        <label class="mode-switch" for="dataMode">View
+          <select id="dataMode">
+            <option value="simulation">Simulation</option>
+            <option value="live">Live Moonraker</option>
+          </select>
+        </label>
+        <div class="machine-state" id="connectionState">OFFLINE SIMULATION</div>
+      </div>
+    </header>
+    <section class="connection-panel" id="connectionPanel" hidden aria-label="Moonraker connection">
+      <label for="moonrakerUrl">Moonraker HTTP URL
+        <input id="moonrakerUrl" type="url" value="http://127.0.0.1:7125" spellcheck="false" autocomplete="url">
+      </label>
+      <label for="trackingObject">Tracking object
+        <input id="trackingObject" value="bfp_dual_mesh" spellcheck="false" autocomplete="off">
+      </label>
+      <label for="moonrakerToken">Bearer token
+        <input id="moonrakerToken" type="password" autocomplete="off">
+      </label>
+      <button id="connectButton" type="button">Connect</button>
+    </section>
+    <main>
+      <section class="visual-column" aria-label="Mesh and solver results">
+        <div class="section-head">
+          <h2>Surface and nozzle geometry</h2>
+          <p id="plotModeLabel">Shared Y plane</p>
+        </div>
+        <div class="plot-wrap">
+          <canvas id="mesh" aria-label="Bed mesh and nozzle positions"></canvas>
+          <div class="plot-footer">
+            <div class="legend">
+              <span><i class="swatch t0"></i>T0 reference</span>
+              <span><i class="swatch t1"></i>T1 follower</span>
+            </div>
+            <span id="meshRange">Mesh range --</span>
+          </div>
+        </div>
+        <div class="metrics" aria-live="polite">
+          <div class="metric"><span class="metric-label">Requested ΔZ</span><strong class="metric-value" id="requested">--</strong><span class="metric-note">mechanical + faded mesh</span></div>
+          <div class="metric"><span class="metric-label">Achieved ΔZ</span><strong class="metric-value" id="achieved">--</strong><span class="metric-note">after solver limits</span></div>
+          <div class="metric"><span class="metric-label">Residual</span><strong class="metric-value" id="residual">--</strong><span class="metric-note">requested minus achieved</span></div>
+          <div class="metric"><span class="metric-label">Authority</span><strong class="metric-value" id="authority">--</strong><span class="metric-note">achieved / requested</span></div>
+          <div class="metric"><span class="metric-label">Condition q</span><strong class="metric-value" id="condition">--</strong><span class="metric-note" id="conditionNote">minimum --</span></div>
+          <div class="metric"><span class="metric-label">T0 anchor error</span><strong class="metric-value" id="anchor">--</strong><span class="metric-note">target is near zero</span></div>
+        </div>
+        <div class="motor-strip">
+          <div class="motor-title"><span>Paired Z correction</span><span id="motorLimit">mm / motor</span></div>
+          <div class="motor-values">
+            <div class="motor-side"><span>Z0 front-left = Z1 rear-left</span><strong id="leftOffset">--</strong></div>
+            <div class="motor-side right"><span>Z2 rear-right = Z3 front-right</span><strong id="rightOffset">--</strong></div>
+          </div>
+          <div class="motor-position-line" id="motorPositions">Commanded Z positions: --</div>
+        </div>
+        <div class="condition" id="message" role="status">Loading simulation…</div>
+      </section>
+
+      <aside class="control-column" id="simulationControls" aria-label="Simulation inputs">
+        <section class="control-section">
+          <h3>Scenario <small>repeatable test case</small></h3>
+          <select id="preset" aria-label="Select a test scenario">
+            <option value="nominal">Nominal mesh difference</option>
+            <option value="flat">Flat mesh, mechanical offset only</option>
+            <option value="capped">Offset cap reached</option>
+            <option value="center">Poor conditioning near center</option>
+            <option value="fade">Mesh correction faded out</option>
+          </select>
+        </section>
+        <section class="control-section">
+          <h3>Nozzle positions <small>same Y axis</small></h3>
+          <div class="slider-row"><div class="slider-label"><label for="x0">T0 X</label><output id="x0Value"></output></div><input id="x0" type="range" min="0" max="806" step="1"><div class="range-limits"><span>0</span><span>806 mm</span></div></div>
+          <div class="slider-row"><div class="slider-label"><label for="x1">T1 X</label><output id="x1Value"></output></div><input id="x1" type="range" min="0" max="806" step="1"><div class="range-limits"><span>0</span><span>806 mm</span></div></div>
+          <div class="slider-row"><div class="slider-label"><label for="y">Shared Y</label><output id="yValue"></output></div><input id="y" type="range" min="0" max="800" step="1"><div class="range-limits"><span>0</span><span>800 mm</span></div></div>
+        </section>
+        <section class="control-section">
+          <h3>Calibration and fade</h3>
+          <div class="slider-row"><div class="slider-label"><label for="mechanical_delta">Mechanical T1−T0</label><output id="mechanical_deltaValue"></output></div><input id="mechanical_delta" type="range" min="-0.6" max="0.6" step="0.01"><div class="range-limits"><span>−0.60</span><span>+0.60 mm</span></div></div>
+          <div class="slider-row"><div class="slider-label"><label for="fade">Mesh fade factor</label><output id="fadeValue"></output></div><input id="fade" type="range" min="0" max="1" step="0.01"><div class="range-limits"><span>0 (faded)</span><span>1 (full)</span></div></div>
+        </section>
+        <section class="control-section">
+          <h3>Synthetic surface <small>height in mm</small></h3>
+          <div class="small-grid">
+            <div class="slider-row"><div class="slider-label"><label for="x_tilt">X tilt</label><output id="x_tiltValue"></output></div><input id="x_tilt" type="range" min="-1" max="1" step="0.01"></div>
+            <div class="slider-row"><div class="slider-label"><label for="y_tilt">Y tilt</label><output id="y_tiltValue"></output></div><input id="y_tilt" type="range" min="-1" max="1" step="0.01"></div>
+          </div>
+          <div class="slider-row"><div class="slider-label"><label for="bowl">Corner rise / bowl</label><output id="bowlValue"></output></div><input id="bowl" type="range" min="-0.5" max="0.5" step="0.01"></div>
+        </section>
+        <section class="control-section">
+          <h3>Solver limits</h3>
+          <div class="slider-row"><div class="slider-label"><label for="max_motor_offset">Max offset per motor</label><output id="max_motor_offsetValue"></output></div><input id="max_motor_offset" type="range" min="0.05" max="0.30" step="0.01"><div class="range-limits"><span>0.05</span><span>0.30 mm</span></div></div>
+          <div class="safety-line"><span>Differential safety cap</span><strong id="differentialLimit">1.000 mm</strong></div>
+          <div class="safety-line"><span>Minimum condition q</span><strong id="conditionLimit">0.100</strong></div>
+        </section>
+      </aside>
+    </main>
+  </div>
+  <script>
+    const defaults = {
+      x0: 220, x1: 590, y: 400, mechanical_delta: 0.05, fade: 1,
+      x_tilt: 0.1, y_tilt: -0.04, bowl: 0.1, max_motor_offset: 0.20
+    };
+    const presets = {
+      nominal: { ...defaults },
+      flat: { ...defaults, mechanical_delta: 0.18, fade: 1, x_tilt: 0, y_tilt: 0, bowl: 0 },
+      capped: { ...defaults, mechanical_delta: 0.55, x_tilt: 0.85, y_tilt: 0, bowl: 0.3, max_motor_offset: 0.06 },
+      center: { ...defaults, x0: 396, x1: 410, mechanical_delta: 0.12 },
+      fade: { ...defaults, mechanical_delta: 0, fade: 0, x_tilt: 0.8, y_tilt: -0.3, bowl: 0.35 }
+    };
+    const controls = ['x0', 'x1', 'y', 'mechanical_delta', 'fade', 'x_tilt', 'y_tilt', 'bowl', 'max_motor_offset'];
+    const canvas = document.getElementById('mesh');
+    const context = canvas.getContext('2d');
+    let latest = null;
+    let dragTarget = null;
+    let requestId = 0;
+    let liveRequested = false;
+    let liveInFlight = false;
+    let liveTimer = null;
+
+    function values() {
+      return Object.fromEntries(controls.map((name) => [name, Number(document.getElementById(name).value)]));
+    }
+
+    function setValues(data) {
+      for (const name of controls) {
+        document.getElementById(name).value = data[name];
+        updateOutput(name, Number(data[name]));
+      }
+      scheduleEvaluation();
+    }
+
+    function updateOutput(name, value) {
+      const precision = ['x0', 'x1', 'y'].includes(name) ? 0 : 2;
+      document.getElementById(name + 'Value').textContent = value.toFixed(precision) + (precision ? ' mm' : ' mm');
+    }
+
+    function signed(value, precision=3) {
+      return (value >= 0 ? '+' : '−') + Math.abs(value).toFixed(precision);
+    }
+
+    function scheduleEvaluation() {
+      for (const name of controls) updateOutput(name, Number(document.getElementById(name).value));
+      clearTimeout(scheduleEvaluation.timer);
+      scheduleEvaluation.timer = setTimeout(evaluate, 35);
+    }
+
+    async function evaluate() {
+      const request = ++requestId;
+      try {
+        const response = await fetch('/api/evaluate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(values())
+        });
+        const payload = await response.json();
+        if (request !== requestId) return;
+        if (!payload.ok) {
+          showError(payload.error);
+          return;
+        }
+        latest = payload.result;
+        showResult(latest);
+      } catch (error) {
+        showError('Simulator endpoint unavailable: ' + error.message);
+      }
+    }
+
+    function showResult(data) {
+      const set = (id, text) => { document.getElementById(id).textContent = text; };
+      set('requested', signed(data.requested_d) + ' mm');
+      set('achieved', signed(data.achieved_d) + ' mm');
+      set('residual', signed(data.residual) + ' mm');
+      set('authority', (data.authority * 100).toFixed(1) + '%');
+      set('condition', data.condition_q.toFixed(4));
+      set('conditionNote', 'minimum ' + data.min_condition_q.toFixed(3));
+      set('conditionLimit', data.min_condition_q.toFixed(3));
+      set('differentialLimit', data.max_nozzle_differential.toFixed(3) + ' mm');
+      set('motorLimit', '±' + data.params.max_motor_offset.toFixed(3) + ' mm / motor');
+      set('anchor', signed(data.anchor_error, 6) + ' mm');
+      set('leftOffset', signed(data.offsets[0], 4));
+      set('rightOffset', signed(data.offsets[2], 4));
+      set('motorPositions', 'Simulated motor positions are not represented.');
+      set('meshRange', 'Mesh range ' + signed(data.mesh_range[0], 3) + ' to ' + signed(data.mesh_range[1], 3) + ' mm');
+      const constrained = data.hard_scale < 0.999999;
+      const message = constrained
+        ? 'Motor cap engaged at ' + (data.hard_scale * 100).toFixed(1) + '% scale. Residual remains visible.'
+        : 'Solver valid. T0 anchor and paired motor invariants are active.';
+      showMessage(message, false);
+      drawMesh(data);
+    }
+
+    function showLiveResult(data) {
+      const set = (id, text) => { document.getElementById(id).textContent = text; };
+      const metric = (value, unit=' mm') => Number.isFinite(value) ? signed(value) + unit : '—';
+      set('requested', metric(data.requested_d));
+      set('achieved', metric(data.achieved_d));
+      set('residual', metric(data.residual));
+      set('authority', Number.isFinite(data.authority) ? (data.authority * 100).toFixed(1) + '%' : '—');
+      set('condition', Number.isFinite(data.condition_q) ? data.condition_q.toFixed(4) : '—');
+      set('conditionNote', 'minimum ' + data.min_condition_q.toFixed(3));
+      set('conditionLimit', data.min_condition_q.toFixed(3));
+      set('differentialLimit', data.max_nozzle_differential.toFixed(3) + ' mm');
+      set('motorLimit', Number.isFinite(data.max_motor_offset)
+        ? '±' + data.max_motor_offset.toFixed(3) + ' mm / motor'
+        : 'limit unavailable');
+      set('anchor', metric(data.anchor_error, ' mm'));
+      const offsets = Array.isArray(data.offsets) ? data.offsets : [];
+      set('leftOffset', offsets.length >= 2 ? signed(offsets[0], 4) : '—');
+      set('rightOffset', offsets.length >= 4 ? signed(offsets[2], 4) : '—');
+      const positions = Array.isArray(data.motor_positions) ? data.motor_positions : [];
+      set('motorPositions', positions.length === 4
+        ? 'Commanded Z: ' + positions.map((value, index) => 'Z' + index + ' ' + Number(value).toFixed(3)).join('   ')
+        : 'Commanded Z positions unavailable.');
+      const range = data.mesh_range || [0, 0];
+      set('meshRange', data.mesh_grid.length >= 2
+        ? 'Z ' + signed(range[0], 3) + ' to ' + signed(range[1], 3) + ' mm · ' + (data.mesh_profile || 'unnamed profile')
+        : 'No active bed mesh');
+
+      const status = document.getElementById('connectionState');
+      status.textContent = !data.tracking_available
+        ? 'LIVE · BFP OBJECT MISSING'
+        : data.tracking_enabled ? 'LIVE · TRACKING ENABLED' : 'LIVE · TRACKING DISABLED';
+      status.className = 'machine-state ' + (!data.tracking_available || data.baseline_dirty || data.motor_map_verified === false ? 'warning' : 'live');
+
+      let message = 'Moonraker connected · homed axes: ' + (data.homed_axes || 'none');
+      if (!data.tracking_available) message += ' · tracking object not found';
+      if (data.mesh_grid.length < 2) message += ' · no active mesh';
+      if (data.mode) message += ' · mode ' + data.mode;
+      if (data.baseline_dirty) message += ' · baseline requires QGL';
+      if (data.motor_map_verified === false) message += ' · motor map not verified';
+      if (data.disable_reason) message += ' · ' + data.disable_reason;
+      showMessage(message, false);
+      drawMesh(data);
+    }
+
+    function showError(error) {
+      latest = null;
+      for (const id of ['requested', 'achieved', 'residual', 'authority', 'condition', 'anchor', 'leftOffset', 'rightOffset']) {
+        document.getElementById(id).textContent = '—';
+      }
+      document.getElementById('motorPositions').textContent = 'Commanded Z positions: --';
+      if (liveRequested) {
+        const status = document.getElementById('connectionState');
+        status.textContent = 'MOONRAKER UNAVAILABLE';
+        status.className = 'machine-state error';
+      }
+      showMessage(error, true);
+      drawMesh(null);
+    }
+
+    async function pollLive() {
+      if (!liveRequested || liveInFlight) return;
+      liveInFlight = true;
+      try {
+        const response = await fetch('/api/live', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            moonraker_url: document.getElementById('moonrakerUrl').value,
+            tracking_object: document.getElementById('trackingObject').value,
+            token: document.getElementById('moonrakerToken').value
+          })
+        });
+        const payload = await response.json();
+        if (!payload.ok) {
+          showError(payload.error);
+          return;
+        }
+        latest = payload.result;
+        showLiveResult(latest);
+      } catch (error) {
+        showError('Live request failed: ' + error.message);
+      } finally {
+        liveInFlight = false;
+      }
+    }
+
+    function setLiveMode(enabled) {
+      document.getElementById('connectionPanel').hidden = !enabled;
+      document.querySelectorAll('#simulationControls input, #simulationControls select').forEach((control) => {
+        control.disabled = enabled;
+      });
+      document.querySelector('#plotModeLabel').textContent = enabled
+        ? 'Live coordinates'
+        : 'Shared Y plane';
+      if (enabled) {
+        document.getElementById('connectionState').textContent = 'LIVE · NOT CONNECTED';
+        document.getElementById('connectionState').className = 'machine-state warning';
+        showMessage('Enter the Moonraker address and connect to read printer status.', false);
+      } else {
+        stopLive();
+        document.getElementById('connectionState').textContent = 'OFFLINE SIMULATION';
+        document.getElementById('connectionState').className = 'machine-state';
+        scheduleEvaluation();
+      }
+    }
+
+    function stopLive() {
+      liveRequested = false;
+      liveInFlight = false;
+      if (liveTimer !== null) clearInterval(liveTimer);
+      liveTimer = null;
+      document.getElementById('connectButton').textContent = 'Connect';
+    }
+
+    function showMessage(text, isError) {
+      const message = document.getElementById('message');
+      message.textContent = text;
+      message.classList.toggle('error', isError);
+    }
+
+    function interpolateColor(value) {
+      const stops = [
+        [0.00, [39, 104, 112]],
+        [0.35, [112, 163, 140]],
+        [0.62, [190, 205, 119]],
+        [0.82, [239, 194, 104]],
+        [1.00, [199, 91, 68]]
+      ];
+      let left = stops[0], right = stops[stops.length - 1];
+      for (let i = 0; i < stops.length - 1; i++) {
+        if (value >= stops[i][0] && value <= stops[i + 1][0]) {
+          left = stops[i]; right = stops[i + 1]; break;
+        }
+      }
+      const t = (value - left[0]) / (right[0] - left[0] || 1);
+      const rgb = left[1].map((channel, i) => Math.round(channel + (right[1][i] - channel) * t));
+      return `rgb(${rgb.join(',')})`;
+    }
+
+    function drawMesh(data) {
+      const rect = canvas.getBoundingClientRect();
+      const ratio = window.devicePixelRatio || 1;
+      canvas.width = Math.max(1, Math.round(rect.width * ratio));
+      canvas.height = Math.max(1, Math.round(rect.height * ratio));
+      context.setTransform(ratio, 0, 0, ratio, 0, 0);
+      const width = rect.width, height = rect.height;
+      context.clearRect(0, 0, width, height);
+      const plot = { x: 42, y: 12, w: width - 55, h: height - 42 };
+      const bounds = data && data.mesh_bounds ? data.mesh_bounds : [0, 806, 0, 800];
+      const xSpan = bounds[1] - bounds[0] || 1;
+      const ySpan = bounds[3] - bounds[2] || 1;
+      context.fillStyle = '#f7f8f3';
+      context.fillRect(plot.x, plot.y, plot.w, plot.h);
+
+      if (data && data.mesh_grid.length >= 2 && data.mesh_grid[0].length >= 2) {
+        const grid = data.mesh_grid;
+        const range = data.mesh_range;
+        const span = range[1] - range[0] || 1;
+        const cellW = plot.w / (grid[0].length - 1);
+        const cellH = plot.h / (grid.length - 1);
+        for (let row = 0; row < grid.length - 1; row++) {
+          for (let column = 0; column < grid[row].length - 1; column++) {
+            const average = (grid[row][column] + grid[row][column + 1] + grid[row + 1][column] + grid[row + 1][column + 1]) / 4;
+            context.fillStyle = interpolateColor((average - range[0]) / span);
+            context.fillRect(
+              plot.x + column * cellW,
+              plot.y + (grid.length - 2 - row) * cellH,
+              cellW + 1,
+              cellH + 1
+            );
+          }
+        }
+      }
+
+      context.strokeStyle = 'rgba(255,255,255,.75)';
+      context.lineWidth = 1;
+      context.font = '10px ui-monospace, monospace';
+      context.fillStyle = '#5e6d66';
+      for (let tick = 0; tick <= 4; tick++) {
+        const x = plot.x + plot.w * tick / 4;
+        const y = plot.y + plot.h * tick / 4;
+        context.beginPath(); context.moveTo(x, plot.y); context.lineTo(x, plot.y + plot.h); context.stroke();
+        context.beginPath(); context.moveTo(plot.x, y); context.lineTo(plot.x + plot.w, y); context.stroke();
+        context.fillText(String(Math.round(bounds[0] + xSpan * tick / 4)), x - 9, plot.y + plot.h + 17);
+        context.fillText(String(Math.round(bounds[3] - ySpan * tick / 4)), 10, y + 3);
+      }
+      context.fillStyle = '#5e6d66';
+      context.fillText('X mm', plot.x + plot.w - 28, height - 5);
+      context.save(); context.translate(11, plot.y + 32); context.rotate(-Math.PI / 2); context.fillText('Y mm', 0, 0); context.restore();
+
+      if (!data || !data.params || data.params.y === null) return;
+      const p = data.params;
+      const mapX = (value) => plot.x + (value - bounds[0]) / xSpan * plot.w;
+      const mapY = (value) => plot.y + (bounds[3] - value) / ySpan * plot.h;
+      const t0 = Number.isFinite(p.x0) ? { x: mapX(p.x0), y: mapY(p.y) + (Number.isFinite(p.x1) ? 8 : 0) } : null;
+      const t1 = Number.isFinite(p.x1) ? { x: mapX(p.x1), y: mapY(p.y) - 8 } : null;
+      if (t0 && t1) {
+        context.setLineDash([5, 4]); context.strokeStyle = 'rgba(29,41,38,.6)';
+        context.beginPath(); context.moveTo(t0.x, t0.y); context.lineTo(t1.x, t1.y); context.stroke(); context.setLineDash([]);
+      }
+      if (t0) marker(t0, '#c64f3d', 'T0');
+      if (t1) marker(t1, '#176e68', 'T1');
+
+      function marker(point, color, label) {
+        context.beginPath(); context.arc(point.x, point.y, 8, 0, Math.PI * 2); context.fillStyle = 'rgba(255,255,255,.92)'; context.fill();
+        context.beginPath(); context.arc(point.x, point.y, 5, 0, Math.PI * 2); context.fillStyle = color; context.fill();
+        const labelX = Math.min(plot.x + plot.w - 32, Math.max(plot.x + 4, point.x + 9));
+        const labelY = Math.max(plot.y + 15, point.y - 10);
+        context.fillStyle = '#fff'; context.fillRect(labelX - 3, labelY - 10, 26, 16);
+        context.fillStyle = color; context.font = '700 10px "Segoe UI", sans-serif'; context.fillText(label, labelX + 2, labelY + 1);
+      }
+    }
+
+    function pointerPosition(event) {
+      const rect = canvas.getBoundingClientRect();
+      const plot = { x: 42, y: 12, w: rect.width - 55, h: rect.height - 42 };
+      return {
+        x: Math.max(0, Math.min(806, (event.clientX - rect.left - plot.x) / plot.w * 806)),
+        y: Math.max(0, Math.min(800, (1 - (event.clientY - rect.top - plot.y) / plot.h) * 800)),
+        plot
+      };
+    }
+
+    canvas.addEventListener('pointerdown', (event) => {
+      if (!latest || latest.live) return;
+      const point = pointerPosition(event);
+      const t0px = latest.params.x0 / 806 * point.plot.w + point.plot.x;
+      const t1px = latest.params.x1 / 806 * point.plot.w + point.plot.x;
+      dragTarget = Math.abs(event.offsetX - t0px) <= Math.abs(event.offsetX - t1px) ? 'x0' : 'x1';
+      canvas.setPointerCapture(event.pointerId);
+      event.preventDefault();
+    });
+    canvas.addEventListener('pointermove', (event) => {
+      if (!dragTarget) return;
+      const point = pointerPosition(event);
+      document.getElementById(dragTarget).value = Math.round(point.x);
+      document.getElementById('y').value = Math.round(point.y);
+      scheduleEvaluation();
+    });
+    canvas.addEventListener('pointerup', () => { dragTarget = null; });
+    canvas.addEventListener('pointercancel', () => { dragTarget = null; });
+
+    for (const name of controls) document.getElementById(name).addEventListener('input', scheduleEvaluation);
+    document.getElementById('preset').addEventListener('change', (event) => setValues(presets[event.target.value]));
+    document.getElementById('dataMode').addEventListener('change', (event) => {
+      setLiveMode(event.target.value === 'live');
+    });
+    document.getElementById('connectButton').addEventListener('click', () => {
+      if (liveRequested) {
+        stopLive();
+        document.getElementById('connectionState').textContent = 'LIVE · DISCONNECTED';
+        document.getElementById('connectionState').className = 'machine-state warning';
+        showMessage('Moonraker polling stopped.', false);
+        return;
+      }
+      liveRequested = true;
+      document.getElementById('connectButton').textContent = 'Disconnect';
+      pollLive();
+      liveTimer = setInterval(pollLive, 2000);
+    });
+    window.addEventListener('resize', () => latest && drawMesh(latest));
+
+    setValues(defaults);
+  </script>
+</body>
+</html>
