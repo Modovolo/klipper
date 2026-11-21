@@ -230,7 +230,10 @@ class BFPDualCalibration:
                     "BFP dual Z: Cannot calibrate during a print"
                 )
 
-        tam = self.printer.lookup_object("bfp_dual_mesh", None)
+        tam = self.printer.lookup_object("tam_mesh", None)
+        if tam is None:
+            # Backwards-compatibility with legacy configs.
+            tam = self.printer.lookup_object("bfp_dual_mesh", None)
         if tam is not None:
             if (getattr(tam, "enabled", False)
                     or getattr(tam, "tracking_suspended", False)

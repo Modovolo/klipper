@@ -10,7 +10,7 @@
 import math
 import logging
 import chelper
-from . import bfp_dual_mesh_math
+from . import tam_mesh_math
 
 
 class _BFPMotorAxis:
@@ -130,7 +130,7 @@ class BFPDualTracking:
 
         # Existing proven calibration object.
         self.calibration_object_name = config.get(
-            'calibration_object', 'bfp_dual_calibration')
+            'calibration_object', 'tam')
 
         # IDEX rail names. Klipper versions have exposed the primary rail as
         # either "x" or "stepper_x", so connection performs a safe alias
@@ -622,7 +622,7 @@ class BFPDualTracking:
         )
 
     def _weights(self, x, y):
-        return bfp_dual_mesh_math.gantry_weights(
+        return tam_mesh_math.gantry_weights(
             x, y, self.left_x, self.right_x, self.front_y, self.rear_y)
 
     @staticmethod
@@ -649,7 +649,7 @@ class BFPDualTracking:
 
     def _solve_offsets(self, w0, w1, requested_d):
         try:
-            return bfp_dual_mesh_math.solve_offsets(
+            return tam_mesh_math.solve_offsets(
                 w0, w1, requested_d, self.authority_lambda,
                 self.min_condition_q, self.max_motor_offset)
         except ValueError as e:
